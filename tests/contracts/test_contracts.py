@@ -163,3 +163,58 @@ def test_trade_record_cost_attribution():
         exit_reason="Target R:R 1:2 achieved",
     )
     assert record.net_pnl == record.gross_pnl - record.costs - record.slippage
+
+
+def test_ema_deterministic_computation():
+    import numpy as np
+    from quant.indicators.base import EMA
+
+    ema = EMA(period=3)
+    closes = np.array([10.0, 10.0, 10.0, 20.0, 30.0])
+    result = ema.calculate(closes)
+    assert np.isnan(result[0])
+    assert np.isnan(result[1])
+    assert np.isclose(result[2], 10.0)
+    assert result[3] > 10.0
+
+
+def test_atr_deterministic_computation():
+    import numpy as np
+    from quant.indicators.base import ATR
+
+    atr = ATR(period=2)
+    closes = np.array([100.0, 105.0, 102.0])
+    highs = np.array([102.0, 107.0, 104.0])
+    lows = np.array([99.0, 104.0, 100.0])
+    result = atr.calculate(closes, highs=highs, lows=lows)
+    assert np.isnan(result[0])
+    assert not np.isnan(result[1])
+    assert result[1] > 0
+
+
+def test_paper_order_creation_and_fill():
+    from services.paper_engine.contracts import PaperOrder, PaperFill, PaperOrderStatus
+    from services.backtest_engine.contracts import OrderSide, OrderType
+
+    order = PaperOrder(
+        symbol="TCS",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=10,
+        stop_loss=3400.0,
+        target_price=3600.0,
+    )
+    assert order.status == PaperOrderStatus.PENDING
+    assert order.quantity == 10
+
+    fill = PaperFill(
+        order_id=order.order_id,
+        symbol=order.symbol,
+        side=order.side,
+        quantity=order.quantity,
+        fill_price=3500.25,
+        slippage=0.25,
+        commission=20.0,
+    )
+    assert fill.fill_price == 3500.25
+    assert fill.commission == 20.0
