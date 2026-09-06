@@ -16,6 +16,7 @@ from apps.api.core.config import settings
 from apps.api.core.logging import get_logger, setup_logging
 from apps.api.routes.health import router as health_router
 from apps.api.routes.system import router as system_router
+from apps.api.routes.data import router as data_router
 
 # Initialize structured logging
 setup_logging()
@@ -77,6 +78,7 @@ app.include_router(health_router)
 # Mount API v1 Routers
 app.include_router(health_router, prefix=settings.API_V1_PREFIX)
 app.include_router(system_router, prefix=settings.API_V1_PREFIX)
+app.include_router(data_router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/", summary="Root endpoint")
