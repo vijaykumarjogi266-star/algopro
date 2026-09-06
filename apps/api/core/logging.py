@@ -7,11 +7,11 @@ timestamp, level, component, request_id, experiment_id, message.
 import logging
 import sys
 from typing import Any, Dict
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger import json
 from apps.api.core.config import settings
 
 
-class CustomJsonFormatter(jsonlogger.JsonFormatter):
+class CustomJsonFormatter(json.JsonFormatter):
     def add_fields(
         self,
         log_record: Dict[str, Any],
