@@ -1,0 +1,57 @@
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: algolab-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-algolab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-algolab_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-algolab}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-algolab} -d ${POSTGRES_DB:-algolab}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - algolab-network
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: algolab-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-algolab}:${POSTGRES_PASSWORD:-algolab_secret}@postgres:5432/${POSTGRES_DB:-algolab}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./apps:/app/apps
+      - ./services:/app/services
+      - ./quant:/app/quant
+      - ./data:/app/data
+      - ./database:/app/database
+      - ./research:/app/research
+    networks:
+      - algolab-network
+
+volumes:
+  postgres_data:
+    name: algolab_postgres_data
+
+networks:
+  algolab-network:
+    name: algolab_network
+    driver: bridge

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "algo-lab"
+version = "0.1.0"
+description = "Algo Lab: Quantitative Investment and Trading Research Operating System for Indian Markets"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Algo Lab Core Team" }
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apps*", "services*", "quant*", "data*", "database*"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
