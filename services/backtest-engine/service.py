@@ -20,6 +20,9 @@ from services.backtest_engine.contracts import (
     SlippageModelConfig,
     TradeRecord,
     OrderSide,
+    ExperimentDefinition,
+    ExperimentRun,
+    ExperimentStatus,
 )
 from services.backtest_engine.fingerprint import compute_reproducibility_hash
 from services.backtest_engine.persistence import BacktestRunStore
@@ -49,6 +52,7 @@ class BacktestService:
         slippage_model: Optional[SlippageModelConfig] = None,
         dataset_version: str = "2026.09.14",
         git_commit: str = "main",
+        experiment_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Validates, hashes, registers, and initiates an asynchronous backtest run."""
         # 1. Validation
@@ -59,7 +63,7 @@ class BacktestService:
         if initial_capital <= 0:
             raise ValueError("initial_capital must be strictly positive")
 
-        experiment_id = f"exp_{uuid.uuid4().hex[:12]}"
+        experiment_id = experiment_id or f"exp_{uuid.uuid4().hex[:12]}"
         cost_cfg = cost_model or CostModelConfig()
         slip_cfg = slippage_model or SlippageModelConfig()
         params = parameters or {}
@@ -118,6 +122,10 @@ class BacktestService:
         try:
             self.store.update_status(experiment_id, "RUNNING")
             self.store.append_audit_event(experiment_id, "JOB_STARTED", {"start_time": repro.start_date.isoformat()})
+            exp_def = self.store.get_experiment(experiment_id)
+            if exp_def:
+                exp_def.status = ExperimentStatus.RUNNING
+                self.store.save_experiment(exp_def)
 
             # Mock simulation: simulate 1 order proposal and 1 risk evaluation
             order_price = 2500.0
@@ -163,6 +171,9 @@ class BacktestService:
                 )
                 self.store.update_status(experiment_id, "COMPLETED", metrics=metrics)
                 self.store.append_audit_event(experiment_id, "JOB_COMPLETED", {"metrics": metrics.model_dump() if hasattr(metrics, "model_dump") else metrics.dict()})
+                if exp_def:
+                    exp_def.status = ExperimentStatus.COMPLETED
+                    self.store.save_experiment(exp_def)
             else:
                 self.store.append_audit_event(
                     experiment_id,
@@ -170,10 +181,59 @@ class BacktestService:
                     {"code": risk_eval.rejection_code.value, "reason": risk_eval.rejection_reason}
                 )
                 self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
 
         except Exception as e:
             self.store.append_audit_event(experiment_id, "JOB_ERROR", {"error": str(e)})
             self.store.update_status(experiment_id, "FAILED")
+            try:
+                exp_def = self.store.get_experiment(experiment_id)
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+            except Exception:
+                pass
+
+    def submit_experiment(self, exp: ExperimentDefinition, idempotent: bool = True) -> Dict[str, Any]:
+        """Submits an experiment definition for execution with idempotency protection."""
+        existing_run = self.store.get_run(exp.experiment_id)
+        if existing_run and idempotent:
+            if existing_run["status"] in ("PENDING", "RUNNING", "COMPLETED"):
+                return {
+                    "status": "already_submitted",
+                    "experiment_id": exp.experiment_id,
+                    "run_id": exp.experiment_id,
+                    "reproducibility_hash": existing_run["reproducibility_hash"],
+                    "is_idempotent_duplicate": True,
+                }
+
+        exp.status = ExperimentStatus.PENDING
+        self.store.save_experiment(exp)
+
+        res = self.submit_backtest(
+            strategy_id=exp.strategy_id,
+            universe=exp.universe,
+            start_date=exp.start_date,
+            end_date=exp.end_date,
+            parameters=exp.parameters,
+            initial_capital=exp.initial_capital,
+            timeframe=exp.timeframe,
+            cost_model=exp.cost_model,
+            slippage_model=exp.slippage_model,
+            dataset_version=exp.dataset_version,
+            git_commit=exp.code_revision,
+            experiment_id=exp.experiment_id,
+        )
+
+        return {
+            "status": "submitted",
+            "experiment_id": exp.experiment_id,
+            "run_id": res["experiment_id"],
+            "reproducibility_hash": res["reproducibility_hash"],
+            "is_idempotent_duplicate": False,
+        }
 
     def get_run_status(self, experiment_id: str) -> Optional[Dict[str, Any]]:
         return self.store.get_run(experiment_id)
