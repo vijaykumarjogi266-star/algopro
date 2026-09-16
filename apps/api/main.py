@@ -18,6 +18,7 @@ from apps.api.routes.health import router as health_router
 from apps.api.routes.system import router as system_router
 from apps.api.routes.data import router as data_router
 from apps.api.routes.experiments import router as experiments_router
+from apps.api.routes.research_ui import router as research_ui_router
 
 # Initialize structured logging
 setup_logging()
@@ -81,6 +82,7 @@ app.include_router(health_router, prefix=settings.API_V1_PREFIX)
 app.include_router(system_router, prefix=settings.API_V1_PREFIX)
 app.include_router(data_router, prefix=settings.API_V1_PREFIX)
 app.include_router(experiments_router, prefix=settings.API_V1_PREFIX)
+app.include_router(research_ui_router)
 
 
 @app.get("/", summary="Root endpoint")
@@ -90,6 +92,7 @@ async def root():
         "version": settings.PROJECT_VERSION,
         "stage": "Stage 1: Foundation",
         "description": "Systematic research and decision platform for Indian markets",
+        "research_ui_url": "/research",
         "principles_url": f"{settings.API_V1_PREFIX}/system/principles",
         "system_status_url": f"{settings.API_V1_PREFIX}/system/info",
         "docs_url": "/docs",
