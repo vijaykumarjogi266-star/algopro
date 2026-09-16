@@ -91,6 +91,7 @@ class OHLCVBar(BaseModel):
     turnover: Optional[float] = Field(default=None, ge=0, description="Total value traded (INR)")
     vwap: Optional[float] = Field(default=None, gt=0, description="Volume Weighted Average Price")
     open_interest: Optional[float] = Field(default=None, ge=0, description="Open interest for derivatives")
+    trade_count: Optional[int] = Field(default=None, ge=0, description="Number of trades in bar")
 
     data_source: str = "default_feed"
     dataset_version: str = "v1.0.0"
