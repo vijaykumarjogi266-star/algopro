@@ -318,6 +318,8 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       <button class="nav-btn" onclick="switchView('results')">Research Results</button>
       <button class="nav-btn" onclick="switchView('compare')">Compare</button>
       <button class="nav-btn" onclick="switchView('audit')">Audit & Provenance</button>
+      <button class="nav-btn" onclick="switchView('paper')">Paper Trading</button>
+      <button class="nav-btn" onclick="switchView('settings')">Settings</button>
     </div>
   </nav>
 
@@ -832,6 +834,180 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- VIEW 7: PAPER TRADING DASHBOARD -->
+    <div id="view-paper" class="view-section">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Paper Trading Sessions</div>
+          <div class="badge badge-completed">Safe Simulated Execution</div>
+        </div>
+        <p style="color: var(--text-muted); margin-bottom: 16px;">
+          Simulated paper execution engine with independent risk evaluation, deterministic slippage, and statutory fee attribution. Zero real broker execution.
+        </p>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Session ID</th>
+                <th>Name</th>
+                <th>Strategy</th>
+                <th>Universe</th>
+                <th>Status</th>
+                <th>Initial Capital</th>
+                <th>Total Equity</th>
+                <th>Realized P&L</th>
+                <th>Unrealized P&L</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="paper-sessions-tbody">
+              <tr><td colspan="10" style="text-align: center; color: var(--text-muted);">Loading paper sessions...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Create Session Form -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Initialize Paper Trading Session</div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+          <div>
+            <label style="display:block; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Session Name</label>
+            <input type="text" id="paper-name-input" class="form-control" placeholder="e.g., ORB Intraday Paper Run" style="width: 100%; background: var(--bg); border: 1px solid var(--card-border); color: var(--text); padding: 8px; border-radius: 6px;">
+          </div>
+          <div>
+            <label style="display:block; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Strategy ID</label>
+            <input type="text" id="paper-strategy-input" class="form-control" value="momentum_breakout_v1" style="width: 100%; background: var(--bg); border: 1px solid var(--card-border); color: var(--text); padding: 8px; border-radius: 6px;">
+          </div>
+          <div>
+            <label style="display:block; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Universe (comma-separated)</label>
+            <input type="text" id="paper-universe-input" class="form-control" value="TCS, INFY, RELIANCE" style="width: 100%; background: var(--bg); border: 1px solid var(--card-border); color: var(--text); padding: 8px; border-radius: 6px;">
+          </div>
+          <div>
+            <label style="display:block; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Initial Capital (INR)</label>
+            <input type="number" id="paper-capital-input" class="form-control" value="1000000" style="width: 100%; background: var(--bg); border: 1px solid var(--card-border); color: var(--text); padding: 8px; border-radius: 6px;">
+          </div>
+        </div>
+        <div style="margin-top: 16px;">
+          <button class="btn btn-primary" onclick="createPaperSession()" style="background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer;">Initialize Session</button>
+        </div>
+      </div>
+
+      <!-- Session Detail & Portfolio View -->
+      <div id="paper-detail-card" class="card" style="display: none;">
+        <div class="card-header">
+          <div class="card-title" id="paper-detail-title">Session Detail</div>
+          <div class="badge badge-running" id="paper-detail-status">RUNNING</div>
+        </div>
+        <div class="metric-grid" style="margin-bottom: 16px;">
+          <div class="metric-card">
+            <div class="metric-label">Total Equity</div>
+            <div class="metric-value" id="paper-detail-equity">₹0</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Cash Balance</div>
+            <div class="metric-value" id="paper-detail-cash">₹0</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Unrealized P&L</div>
+            <div class="metric-value" id="paper-detail-unrealized">₹0</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Total Fees Paid</div>
+            <div class="metric-value" id="paper-detail-fees">₹0</div>
+          </div>
+        </div>
+
+        <div style="margin-top: 16px;">
+          <div class="card-title" style="margin-bottom: 8px;">Active Positions</div>
+          <div style="overflow-x: auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Quantity</th>
+                  <th>Avg Entry Price</th>
+                  <th>Current Price</th>
+                  <th>Market Value</th>
+                  <th>Unrealized P&L</th>
+                </tr>
+              </thead>
+              <tbody id="paper-positions-tbody">
+                <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No open positions.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- VIEW 8: SETTINGS & BROKER ADAPTERS -->
+    <div id="view-settings" class="view-section">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Broker & Market Data Connection Adapters</div>
+          <div class="badge badge-created">Credential Masking Active</div>
+        </div>
+        <div class="governance-notice" style="margin-bottom: 16px;">
+          <div>
+            <strong>Security Guarantee:</strong> All API secrets and keys are strictly masked and never exposed in plain text.
+            LIVE trading execution is hard-disabled (LIVE_TRADING_ENABLED = False).
+          </div>
+        </div>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Connection ID</th>
+                <th>Broker / Feed</th>
+                <th>Environment</th>
+                <th>API Key (Masked)</th>
+                <th>Secret Configured</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="broker-connections-tbody">
+              <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Loading connections...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Add Connection Form -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Configure Broker Adapter</div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+          <div>
+            <label style="display:block; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Broker Name</label>
+            <input type="text" id="broker-name-input" class="form-control" placeholder="e.g., zerodha, upstox, simulated" style="width: 100%; background: var(--bg); border: 1px solid var(--card-border); color: var(--text); padding: 8px; border-radius: 6px;">
+          </div>
+          <div>
+            <label style="display:block; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Environment</label>
+            <select id="broker-env-select" style="width: 100%; background: var(--bg); border: 1px solid var(--card-border); color: var(--text); padding: 8px; border-radius: 6px;">
+              <option value="PAPER">PAPER (Simulated Execution)</option>
+              <option value="SANDBOX">SANDBOX (Broker Test Environment)</option>
+              <option value="LIVE" disabled>LIVE (Strictly Disabled by System)</option>
+            </select>
+          </div>
+          <div>
+            <label style="display:block; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">API Key</label>
+            <input type="text" id="broker-key-input" class="form-control" placeholder="Enter API Key" style="width: 100%; background: var(--bg); border: 1px solid var(--card-border); color: var(--text); padding: 8px; border-radius: 6px;">
+          </div>
+          <div>
+            <label style="display:block; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">API Secret</label>
+            <input type="password" id="broker-secret-input" class="form-control" placeholder="Enter API Secret" style="width: 100%; background: var(--bg); border: 1px solid var(--card-border); color: var(--text); padding: 8px; border-radius: 6px;">
+          </div>
+        </div>
+        <div style="margin-top: 16px;">
+          <button class="btn btn-primary" onclick="saveBrokerConnection()" style="background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer;">Save Connection</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <script>
@@ -851,6 +1027,8 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       if (activeBtn) activeBtn.classList.add('active');
 
       if (viewName === 'dashboard' || viewName === 'compare' || viewName === 'audit') loadDashboardExperiments();
+      if (viewName === 'paper') loadPaperSessions();
+      if (viewName === 'settings') loadBrokerConnections();
     }
 
     async function loadDashboardExperiments() {
@@ -1360,6 +1538,180 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       dlAnchor.remove();
     }
 
+    async function loadPaperSessions() {
+      try {
+        const res = await fetch('/api/v1/paper-trading/sessions');
+        const sessions = await res.json();
+        const tbody = document.getElementById('paper-sessions-tbody');
+        if (!tbody) return;
+        if (!sessions || sessions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; color: var(--text-muted);">No paper sessions initialized.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = sessions.map(s => `
+          <tr>
+            <td style="font-family: var(--font-mono);">${s.session_id}</td>
+            <td><strong>${s.name}</strong></td>
+            <td>${s.strategy_id}</td>
+            <td>${s.universe.join(', ')}</td>
+            <td><span class="badge badge-${s.status.toLowerCase()}">${s.status}</span></td>
+            <td>₹${s.initial_capital.toLocaleString()}</td>
+            <td><strong>₹${(s.portfolio.cash + (s.portfolio.positions ? Object.values(s.portfolio.positions).reduce((a,b)=>a+b.market_value,0):0)).toLocaleString()}</strong></td>
+            <td style="color: ${s.portfolio.total_realized_pnl >= 0 ? 'var(--success)' : 'var(--danger)'}">₹${s.portfolio.total_realized_pnl.toFixed(2)}</td>
+            <td style="color: ${s.portfolio.total_unrealized_pnl >= 0 ? 'var(--success)' : 'var(--danger)'}">₹${s.portfolio.total_unrealized_pnl.toFixed(2)}</td>
+            <td>
+              <button class="btn btn-sm" onclick="viewPaperSession('${s.session_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--card-border); color: var(--text); border:none; border-radius: 4px; cursor:pointer;">View</button>
+              ${s.status === 'CREATED' || s.status === 'PAUSED' ? `<button class="btn btn-sm" onclick="startPaperSession('${s.session_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--success); color: #fff; border:none; border-radius: 4px; cursor:pointer;">Start</button>` : ''}
+              ${s.status === 'RUNNING' ? `<button class="btn btn-sm" onclick="stopPaperSession('${s.session_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--danger); color: #fff; border:none; border-radius: 4px; cursor:pointer;">Stop</button>` : ''}
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        console.error('Failed to load paper sessions:', err);
+      }
+    }
+
+    async function createPaperSession() {
+      const name = document.getElementById('paper-name-input').value.trim() || 'Paper Run';
+      const strategyId = document.getElementById('paper-strategy-input').value.trim() || 'momentum_v1';
+      const universe = (document.getElementById('paper-universe-input').value.trim() || 'TCS').split(',').map(s=>s.trim());
+      const capital = parseFloat(document.getElementById('paper-capital-input').value) || 1000000;
+
+      try {
+        const res = await fetch('/api/v1/paper-trading/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: name,
+            strategy_id: strategyId,
+            universe: universe,
+            initial_capital: capital,
+            environment: 'PAPER'
+          })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        alert('Paper trading session created successfully.');
+        loadPaperSessions();
+      } catch (err) {
+        alert('Failed to create session: ' + err.message);
+      }
+    }
+
+    async function startPaperSession(sessionId) {
+      await fetch(`/api/v1/paper-trading/sessions/${sessionId}/start`, { method: 'POST' });
+      loadPaperSessions();
+    }
+
+    async function stopPaperSession(sessionId) {
+      await fetch(`/api/v1/paper-trading/sessions/${sessionId}/stop`, { method: 'POST' });
+      loadPaperSessions();
+    }
+
+    async function viewPaperSession(sessionId) {
+      const res = await fetch(`/api/v1/paper-trading/sessions/${sessionId}`);
+      const s = await res.json();
+      document.getElementById('paper-detail-card').style.display = 'block';
+      document.getElementById('paper-detail-title').innerText = `${s.name} (${s.session_id})`;
+      document.getElementById('paper-detail-status').innerText = s.status;
+      document.getElementById('paper-detail-equity').innerText = `₹${s.portfolio.cash.toLocaleString()}`;
+      document.getElementById('paper-detail-cash').innerText = `₹${s.portfolio.cash.toLocaleString()}`;
+      document.getElementById('paper-detail-unrealized').innerText = `₹${s.portfolio.total_unrealized_pnl.toFixed(2)}`;
+      document.getElementById('paper-detail-fees').innerText = `₹${s.portfolio.total_fees_paid.toFixed(2)}`;
+
+      const posTbody = document.getElementById('paper-positions-tbody');
+      const positions = Object.values(s.portfolio.positions || {});
+      if (positions.length === 0) {
+        posTbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No open positions.</td></tr>';
+      } else {
+        posTbody.innerHTML = positions.map(p => `
+          <tr>
+            <td><strong>${p.symbol}</strong></td>
+            <td>${p.quantity}</td>
+            <td>₹${p.average_entry_price.toFixed(2)}</td>
+            <td>₹${p.current_price.toFixed(2)}</td>
+            <td>₹${p.market_value.toFixed(2)}</td>
+            <td style="color: ${p.unrealized_pnl >= 0 ? 'var(--success)' : 'var(--danger)'}">₹${p.unrealized_pnl.toFixed(2)}</td>
+          </tr>
+        `).join('');
+      }
+    }
+
+    async function loadBrokerConnections() {
+      try {
+        const res = await fetch('/api/v1/brokers/connections');
+        const items = await res.json();
+        const tbody = document.getElementById('broker-connections-tbody');
+        if (!tbody) return;
+        if (!items || items.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No broker connections configured.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = items.map(c => `
+          <tr>
+            <td style="font-family: var(--font-mono);">${c.connection_id}</td>
+            <td><strong>${c.broker_name}</strong></td>
+            <td><span class="badge badge-completed">${c.environment}</span></td>
+            <td style="font-family: var(--font-mono);">${c.api_key_masked || 'None'}</td>
+            <td>${c.api_secret_configured ? '<span style="color:var(--success)">Configured</span>' : '<span style="color:var(--text-muted)">None</span>'}</td>
+            <td>
+              <button class="btn btn-sm" onclick="testBrokerConnection('${c.connection_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--accent); color: #fff; border:none; border-radius: 4px; cursor:pointer;">Test</button>
+              <button class="btn btn-sm" onclick="deleteBrokerConnection('${c.connection_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--card-border); color: var(--text); border:none; border-radius: 4px; cursor:pointer;">Delete</button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        console.error('Failed to load broker connections:', err);
+      }
+    }
+
+    async function saveBrokerConnection() {
+      const broker = document.getElementById('broker-name-input').value.trim();
+      const env = document.getElementById('broker-env-select').value;
+      const key = document.getElementById('broker-key-input').value.trim();
+      const secret = document.getElementById('broker-secret-input').value.trim();
+
+      if (!broker) {
+        alert('Broker name is required.');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/v1/brokers/connections', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            broker_name: broker,
+            environment: env,
+            api_key: key || null,
+            api_secret: secret || null
+          })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        alert('Broker connection saved.');
+        document.getElementById('broker-key-input').value = '';
+        document.getElementById('broker-secret-input').value = '';
+        loadBrokerConnections();
+      } catch (err) {
+        alert('Failed to save connection: ' + err.message);
+      }
+    }
+
+    async function testBrokerConnection(connId) {
+      try {
+        const res = await fetch(`/api/v1/brokers/connections/${connId}/test`, { method: 'POST' });
+        const data = await res.json();
+        alert(`Connection Test Result: ${data.status} - ${data.message}`);
+      } catch (err) {
+        alert('Test failed: ' + err.message);
+      }
+    }
+
+    async function deleteBrokerConnection(connId) {
+      if (!confirm(`Delete connection ${connId}?`)) return;
+      await fetch(`/api/v1/brokers/connections/${connId}`, { method: 'DELETE' });
+      loadBrokerConnections();
+    }
+
     // Initial load
     loadDashboardExperiments();
   </script>
@@ -1396,6 +1748,21 @@ def get_compare_view():
 
 @router.get("/audit", response_class=HTMLResponse, summary="Provenance & Audit View")
 def get_audit_view():
+    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+
+
+@router.get("/settings", response_class=HTMLResponse, summary="Settings & Broker Connections View")
+def get_settings_view():
+    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+
+
+@router.get("/paper-trading", response_class=HTMLResponse, summary="Paper Trading Dashboard View")
+def get_paper_trading_view():
+    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+
+
+@router.get("/paper-trading/{session_id}", response_class=HTMLResponse, summary="Paper Trading Session Detail View")
+def get_paper_trading_session_view(session_id: str):
     return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
 
 
