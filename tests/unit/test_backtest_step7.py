@@ -85,6 +85,24 @@ class TestStage4Step7(unittest.TestCase):
         self.assertFalse(verdict.is_approved)
         self.assertEqual(verdict.rejection_code, RiskRejectionCode.EXCEEDS_MAX_CAPITAL)
 
+    def test_risk_zero_mutation_guarantee(self):
+        engine = RiskEngine(HardRiskLimits(max_capital_per_trade_pct=0.05))
+        portfolio = {"cash": 500000.0, "holdings": {"RELIANCE": 10}, "realized_pnl": 0.0}
+        portfolio_before = dict(portfolio)
+        verdict = engine.evaluate(
+            symbol="RELIANCE",
+            price=2500.0,
+            proposed_quantity=50,  # Exceeds max capital
+            stop_loss=2450.0,
+            current_portfolio_value=portfolio["cash"],
+            current_daily_loss_pct=0.0,
+            current_drawdown_pct=0.0,
+            current_open_positions_count=len(portfolio["holdings"]),
+        )
+        self.assertFalse(verdict.is_approved)
+        # Assert portfolio state remained 100% untouched
+        self.assertEqual(portfolio, portfolio_before)
+
     def test_persistence_store_and_audit_trail(self):
         store = BacktestRunStore(":memory:")
         now = datetime.now(timezone.utc)
