@@ -114,3 +114,8 @@ class AuditEventResponse(BaseModel):
     timestamp: str
     event_type: str
     payload: Dict[str, Any]
+
+
+class ExperimentCompareRequest(BaseModel):
+    baseline_experiment_id: str = Field(..., min_length=1, description="Baseline experiment ID")
+    target_experiment_id: str = Field(..., min_length=1, description="Target experiment ID to compare against baseline")

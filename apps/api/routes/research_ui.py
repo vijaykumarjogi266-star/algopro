@@ -316,6 +316,7 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       <button class="nav-btn" onclick="switchView('create')">New Experiment</button>
       <button class="nav-btn" onclick="switchView('detail')">Experiment Detail</button>
       <button class="nav-btn" onclick="switchView('results')">Research Results</button>
+      <button class="nav-btn" onclick="switchView('compare')">Compare</button>
     </div>
   </nav>
 
@@ -665,6 +666,98 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- VIEW 5: EXPERIMENT COMPARISON -->
+    <div id="view-compare" class="view-section">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Side-by-Side Experiment Comparison</div>
+          <div class="badge badge-completed">Strictly Descriptive • Non-Ranking</div>
+        </div>
+        <div class="form-grid" style="margin-bottom: 16px;">
+          <div class="form-group">
+            <label>Baseline Experiment (Control)</label>
+            <select id="compare-baseline-select">
+              <option value="">-- Select Baseline Experiment --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Target Experiment (Variant)</label>
+            <select id="compare-target-select">
+              <option value="">-- Select Target Experiment --</option>
+            </select>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <button class="btn btn-primary" onclick="runExperimentComparison()">Execute Comparison</button>
+          <span id="compare-status" style="font-size: 0.85rem; color: var(--text-muted);"></span>
+        </div>
+      </div>
+
+      <div id="compare-results-card" class="card" style="display: none;">
+        <div class="card-header">
+          <div class="card-title">Comparative Analysis Results</div>
+          <span id="compare-fp-badge" class="badge"></span>
+        </div>
+
+        <!-- Structural Delta Summary -->
+        <div class="metric-grid" style="margin-bottom: 20px;">
+          <div class="metric-card">
+            <div class="metric-label">Dataset Change</div>
+            <div class="metric-value" id="cmp-dataset-status" style="font-size: 1rem;">--</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Strategy Version</div>
+            <div class="metric-value" id="cmp-strat-status" style="font-size: 1rem;">--</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Universe Scope</div>
+            <div class="metric-value" id="cmp-universe-status" style="font-size: 1rem;">--</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Timeframe Scope</div>
+            <div class="metric-value" id="cmp-timeframe-status" style="font-size: 1rem;">--</div>
+          </div>
+        </div>
+
+        <!-- Parameter Differences -->
+        <div class="card-title" style="font-size: 0.95rem; margin-bottom: 10px;">Hyperparameter Differences</div>
+        <div style="overflow-x: auto; margin-bottom: 20px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Parameter</th>
+                <th>Baseline Value</th>
+                <th>Target Value</th>
+                <th>Difference Status</th>
+              </tr>
+            </thead>
+            <tbody id="cmp-params-tbody">
+              <tr><td colspan="4" style="color: var(--text-muted);">No comparison run yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Quantitative Metric Differences -->
+        <div class="card-title" style="font-size: 0.95rem; margin-bottom: 10px;">Quantitative Empirical Metrics</div>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Measurement</th>
+                <th>Baseline</th>
+                <th>Target</th>
+                <th>Absolute Delta</th>
+                <th>Relative Delta (%)</th>
+              </tr>
+            </thead>
+            <tbody id="cmp-metrics-tbody">
+              <tr><td colspan="5" style="color: var(--text-muted);">No comparison run yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <script>
@@ -683,7 +776,7 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       const activeBtn = btns.find(b => b.innerText.toLowerCase().includes(viewName));
       if (activeBtn) activeBtn.classList.add('active');
 
-      if (viewName === 'dashboard') loadDashboardExperiments();
+      if (viewName === 'dashboard' || viewName === 'compare') loadDashboardExperiments();
     }
 
     async function loadDashboardExperiments() {
@@ -692,33 +785,52 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         const data = await res.json();
         const exps = data.experiments || [];
 
-        document.getElementById('stat-total').innerText = exps.length;
-        document.getElementById('stat-running').innerText = exps.filter(e => e.status === 'RUNNING').length;
-        document.getElementById('stat-completed').innerText = exps.filter(e => e.status === 'COMPLETED').length;
-        document.getElementById('stat-failed').innerText = exps.filter(e => e.status === 'FAILED').length;
-
-        const tbody = document.getElementById('experiments-table-body');
-        if (exps.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No experiments yet. Click \\'New Experiment\\' to create one.</td></tr>';
-          return;
+        // Populate comparison selectors if available
+        const baseSelect = document.getElementById('compare-baseline-select');
+        const tgtSelect = document.getElementById('compare-target-select');
+        if (baseSelect && tgtSelect) {
+          const prevBase = baseSelect.value;
+          const prevTgt = tgtSelect.value;
+          const optsHtml = '<option value="">-- Select Experiment --</option>' +
+            exps.map(e => `<option value="${e.experiment_id}">${e.name} (${e.experiment_id})</option>`).join('');
+          baseSelect.innerHTML = optsHtml;
+          tgtSelect.innerHTML = optsHtml;
+          if (prevBase) baseSelect.value = prevBase;
+          if (prevTgt) tgtSelect.value = prevTgt;
         }
 
-        tbody.innerHTML = exps.map(e => `
-          <tr>
-            <td class="mono"><strong>${e.experiment_id}</strong></td>
-            <td>${e.name}</td>
-            <td>${e.strategy_id} v${e.strategy_version}</td>
-            <td>${e.dataset_id}</td>
-            <td><span class="badge badge-${e.status.toLowerCase()}">${e.status}</span></td>
-            <td class="mono" style="font-size: 0.75rem;">${e.fingerprint.substring(0, 12)}...</td>
-            <td>${new Date(e.created_at).toLocaleString()}</td>
-            <td>
-              <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" onclick="openExperimentDetail('${e.experiment_id}')">
-                Inspect
-              </button>
-            </td>
-          </tr>
-        `).join('');
+        const statTotal = document.getElementById('stat-total');
+        if (statTotal) {
+          statTotal.innerText = exps.length;
+          document.getElementById('stat-running').innerText = exps.filter(e => e.status === 'RUNNING').length;
+          document.getElementById('stat-completed').innerText = exps.filter(e => e.status === 'COMPLETED').length;
+          document.getElementById('stat-failed').innerText = exps.filter(e => e.status === 'FAILED').length;
+        }
+
+        const tbody = document.getElementById('experiments-table-body');
+        if (tbody) {
+          if (exps.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No experiments yet. Click \\'New Experiment\\' to create one.</td></tr>';
+            return;
+          }
+
+          tbody.innerHTML = exps.map(e => `
+            <tr>
+              <td class="mono"><strong>${e.experiment_id}</strong></td>
+              <td>${e.name}</td>
+              <td>${e.strategy_id} v${e.strategy_version}</td>
+              <td>${e.dataset_id}</td>
+              <td><span class="badge badge-${e.status.toLowerCase()}">${e.status}</span></td>
+              <td class="mono" style="font-size: 0.75rem;">${e.fingerprint.substring(0, 12)}...</td>
+              <td>${new Date(e.created_at).toLocaleString()}</td>
+              <td>
+                <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" onclick="openExperimentDetail('${e.experiment_id}')">
+                  Inspect
+                </button>
+              </td>
+            </tr>
+          `).join('');
+        }
       } catch (err) {
         console.error('Failed to load dashboard:', err);
       }
@@ -972,6 +1084,112 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       `;
     }
 
+    async function runExperimentComparison() {
+      const bId = document.getElementById('compare-baseline-select').value;
+      const tId = document.getElementById('compare-target-select').value;
+      const statusSpan = document.getElementById('compare-status');
+      const resultsCard = document.getElementById('compare-results-card');
+
+      if (!bId || !tId) {
+        statusSpan.innerText = 'Please select both baseline and target experiments.';
+        statusSpan.style.color = 'var(--warning)';
+        return;
+      }
+
+      statusSpan.innerText = 'Computing comparison...';
+      statusSpan.style.color = 'var(--text-muted)';
+
+      try {
+        const res = await fetch('/api/v1/experiments/compare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseline_experiment_id: bId, target_experiment_id: tId })
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          statusSpan.innerText = `Error: ${JSON.stringify(err.detail)}`;
+          statusSpan.style.color = 'var(--danger)';
+          return;
+        }
+
+        const data = await res.json();
+        statusSpan.innerText = '✓ Comparison computed successfully.';
+        statusSpan.style.color = 'var(--success)';
+        resultsCard.style.display = 'block';
+
+        // Badges and structural summary
+        const fpBadge = document.getElementById('compare-fp-badge');
+        if (data.same_fingerprint) {
+          fpBadge.className = 'badge badge-completed';
+          fpBadge.innerText = 'IDENTICAL FINGERPRINT';
+        } else {
+          fpBadge.className = 'badge badge-running';
+          fpBadge.innerText = 'DISTINCT CONFIGURATIONS';
+        }
+
+        document.getElementById('cmp-dataset-status').innerText = data.dataset_changed ? 'MODIFIED' : 'IDENTICAL';
+        document.getElementById('cmp-dataset-status').style.color = data.dataset_changed ? 'var(--warning)' : 'var(--success)';
+
+        document.getElementById('cmp-strat-status').innerText = data.strategy_version_changed ? 'MODIFIED' : 'IDENTICAL';
+        document.getElementById('cmp-strat-status').style.color = data.strategy_version_changed ? 'var(--warning)' : 'var(--success)';
+
+        document.getElementById('cmp-universe-status').innerText = data.universe_changed ? 'MODIFIED' : 'IDENTICAL';
+        document.getElementById('cmp-universe-status').style.color = data.universe_changed ? 'var(--warning)' : 'var(--success)';
+
+        document.getElementById('cmp-timeframe-status').innerText = data.timeframe_changed ? 'MODIFIED' : 'IDENTICAL';
+        document.getElementById('cmp-timeframe-status').style.color = data.timeframe_changed ? 'var(--warning)' : 'var(--success)';
+
+        // Parameters table
+        const paramsTbody = document.getElementById('cmp-params-tbody');
+        const paramEntries = Object.entries(data.parameters_different || {});
+        if (paramEntries.length === 0) {
+          paramsTbody.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted); text-align: center;">No hyperparameter differences found.</td></tr>';
+        } else {
+          paramsTbody.innerHTML = paramEntries.map(([k, p]) => `
+            <tr>
+              <td class="mono"><strong>${k}</strong></td>
+              <td class="mono">${JSON.stringify(p.baseline_value)}</td>
+              <td class="mono">${JSON.stringify(p.target_value)}</td>
+              <td>
+                ${p.is_different 
+                  ? '<span class="badge badge-pending">CHANGED</span>' 
+                  : '<span class="badge badge-completed">EQUAL</span>'}
+              </td>
+            </tr>
+          `).join('');
+        }
+
+        // Metrics table
+        const metricsTbody = document.getElementById('cmp-metrics-tbody');
+        const metricEntries = Object.entries(data.metric_differences || {});
+        if (metricEntries.length === 0) {
+          metricsTbody.innerHTML = '<tr><td colspan="5" style="color: var(--text-muted); text-align: center;">No metric comparisons available.</td></tr>';
+        } else {
+          metricsTbody.innerHTML = metricEntries.map(([k, m]) => {
+            let deltaStr = '--';
+            let deltaPctStr = '--';
+            if (m.is_available && m.difference !== null) {
+              deltaStr = (m.difference > 0 ? '+' : '') + m.difference;
+              deltaPctStr = m.difference_pct !== null ? (m.difference_pct > 0 ? '+' : '') + m.difference_pct + '%' : 'N/A';
+            }
+            return `
+              <tr>
+                <td><strong>${m.metric_name}</strong></td>
+                <td class="mono">${m.baseline_value !== null ? m.baseline_value : '<span style="color: var(--text-muted);">N/A</span>'}</td>
+                <td class="mono">${m.target_value !== null ? m.target_value : '<span style="color: var(--text-muted);">N/A</span>'}</td>
+                <td class="mono">${deltaStr}</td>
+                <td class="mono">${deltaPctStr}</td>
+              </tr>
+            `;
+          }).join('');
+        }
+
+      } catch (err) {
+        statusSpan.innerText = `Error: ${err.message}`;
+        statusSpan.style.color = 'var(--danger)';
+      }
+    }
+
     // Initial load
     loadDashboardExperiments();
   </script>
@@ -999,3 +1217,9 @@ def get_detail_view():
 @router.get("/results", response_class=HTMLResponse, summary="Results Visualization View")
 def get_results_view():
     return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+
+
+@router.get("/compare", response_class=HTMLResponse, summary="Experiment Comparison View")
+def get_compare_view():
+    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+

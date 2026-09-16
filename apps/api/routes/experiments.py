@@ -14,8 +14,13 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from services.backtest_engine.contracts import (
+    BacktestMetrics,
     ExperimentDefinition,
     ExperimentStatus,
+)
+from services.backtest_engine.comparison import (
+    ExperimentComparator,
+    ExperimentComparisonResult,
 )
 from services.backtest_engine.service import BacktestService
 from apps.api.schemas.experiments import (
@@ -24,6 +29,7 @@ from apps.api.schemas.experiments import (
     ExperimentValidationResponse,
     ExperimentResponse,
     ExperimentListResponse,
+    ExperimentCompareRequest,
     RunSubmitResponse,
     RunStatusResponse,
     RunResultResponse,
@@ -270,3 +276,62 @@ def get_run_audit_trail(
 
     events = service.get_audit_trail(run_id)
     return [AuditEventResponse(**e) for e in events]
+
+
+@router.post("/compare", response_model=ExperimentComparisonResult, summary="Side-by-side descriptive comparison of two experiments")
+def compare_experiments(
+    req: ExperimentCompareRequest,
+    service: BacktestService = Depends(get_service),
+):
+    baseline_exp = service.store.get_experiment(req.baseline_experiment_id)
+    if not baseline_exp:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Baseline experiment '{req.baseline_experiment_id}' not found",
+        )
+
+    target_exp = service.store.get_experiment(req.target_experiment_id)
+    if not target_exp:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Target experiment '{req.target_experiment_id}' not found",
+        )
+
+    baseline_run = service.store.get_run(req.baseline_experiment_id)
+    target_run = service.store.get_run(req.target_experiment_id)
+
+    b_metrics = None
+    b_trades = 0
+    b_rejected = 0
+    if baseline_run:
+        b_trades = baseline_run.get("trades_count", 0) or 0
+        b_rejected = baseline_run.get("rejected_trades_count", 0) or 0
+        if baseline_run.get("metrics_json"):
+            try:
+                b_metrics = BacktestMetrics(**json.loads(baseline_run["metrics_json"]))
+            except Exception:
+                b_metrics = None
+
+    t_metrics = None
+    t_trades = 0
+    t_rejected = 0
+    if target_run:
+        t_trades = target_run.get("trades_count", 0) or 0
+        t_rejected = target_run.get("rejected_trades_count", 0) or 0
+        if target_run.get("metrics_json"):
+            try:
+                t_metrics = BacktestMetrics(**json.loads(target_run["metrics_json"]))
+            except Exception:
+                t_metrics = None
+
+    return ExperimentComparator.compare(
+        baseline_exp=baseline_exp,
+        target_exp=target_exp,
+        baseline_metrics=b_metrics,
+        target_metrics=t_metrics,
+        baseline_trades_count=b_trades,
+        target_trades_count=t_trades,
+        baseline_rejected_count=b_rejected,
+        target_rejected_count=t_rejected,
+    )
+

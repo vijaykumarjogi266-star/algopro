@@ -145,3 +145,18 @@ async def test_offline_zero_external_cdn_dependency(client: AsyncClient):
     assert "unpkg.com" not in text
     assert "fonts.googleapis.com" not in text
     assert "<script src=\"http" not in text
+
+
+@pytest.mark.asyncio
+async def test_compare_view_elements(client: AsyncClient):
+    res = await client.get("/research/compare")
+    assert res.status_code == 200
+    text = res.text
+    assert 'id="view-compare"' in text
+    assert 'id="compare-baseline-select"' in text
+    assert 'id="compare-target-select"' in text
+    assert 'id="compare-results-card"' in text
+    assert 'id="cmp-params-tbody"' in text
+    assert 'id="cmp-metrics-tbody"' in text
+    assert "Strictly Descriptive • Non-Ranking" in text
+
