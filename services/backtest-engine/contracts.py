@@ -10,7 +10,7 @@ Adheres to Non-Negotiable Principles:
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class OrderSide(str, Enum):
@@ -122,3 +122,93 @@ class BacktestResult(BaseModel):
     rejected_trades_count: int = 0
     wait_decisions_count: int = 0
     equity_curve: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ExperimentStatus(str, Enum):
+    CREATED = "CREATED"
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ExperimentDefinition(BaseModel):
+    """Canonical specification of a systematic quantitative experiment."""
+
+    experiment_id: str
+    name: str = Field(..., min_length=1)
+    description: Optional[str] = ""
+    strategy_id: str = Field(..., min_length=1)
+    strategy_version: str = Field(..., min_length=1)
+    dataset_id: str = Field(..., min_length=1)
+    dataset_version: str = Field(..., min_length=1)
+    dataset_checksum: str = Field(..., min_length=64, max_length=64, description="SHA-256 dataset digest")
+    universe: List[str] = Field(..., min_length=1)
+    timeframe: str = Field(default="1d", min_length=1)
+    start_date: datetime
+    end_date: datetime
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    risk_policy_version: str = Field(default="1.0.0", min_length=1)
+    cost_model: CostModelConfig = Field(default_factory=CostModelConfig)
+    slippage_model: SlippageModelConfig = Field(default_factory=SlippageModelConfig)
+    initial_capital: float = Field(default=500_000.0, gt=0.0)
+    seed: int = 42
+    code_revision: str = Field(default="main", min_length=1)
+    fingerprint: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    status: ExperimentStatus = ExperimentStatus.CREATED
+
+    @field_validator("universe")
+    @classmethod
+    def validate_universe(cls, v: List[str]) -> List[str]:
+        if not v or len(v) == 0:
+            raise ValueError("Universe cannot be empty")
+        for sym in v:
+            if not sym or not isinstance(sym, str) or not sym.strip():
+                raise ValueError("Universe symbols must be non-empty strings")
+        return v
+
+    @model_validator(mode="after")
+    def validate_dates_and_fingerprint(self) -> "ExperimentDefinition":
+        if self.start_date >= self.end_date:
+            raise ValueError("start_date must be strictly before end_date")
+        if not self.fingerprint:
+            self.fingerprint = self.compute_fingerprint()
+        return self
+
+    def compute_fingerprint(self) -> str:
+        from services.backtest_engine.fingerprint import compute_reproducibility_hash
+        material = {
+            "strategy_id": self.strategy_id,
+            "strategy_version": self.strategy_version,
+            "dataset_id": self.dataset_id,
+            "dataset_version": self.dataset_version,
+            "dataset_checksum": self.dataset_checksum,
+            "universe": sorted(self.universe),
+            "timeframe": self.timeframe,
+            "start_date": self.start_date.isoformat(),
+            "end_date": self.end_date.isoformat(),
+            "parameters": self.parameters,
+            "risk_policy_version": self.risk_policy_version,
+            "cost_model": self.cost_model.model_dump() if hasattr(self.cost_model, "model_dump") else self.cost_model.dict(),
+            "slippage_model": self.slippage_model.model_dump() if hasattr(self.slippage_model, "model_dump") else self.slippage_model.dict(),
+            "initial_capital": self.initial_capital,
+            "seed": self.seed,
+            "code_revision": self.code_revision,
+        }
+        return compute_reproducibility_hash(material)
+
+
+class ExperimentRun(BaseModel):
+    """Encapsulates a backtest execution run instantiated from an experiment."""
+
+    run_id: str
+    experiment_id: str
+    status: ExperimentStatus = ExperimentStatus.PENDING
+    reproducibility_hash: str
+    metrics: Optional[BacktestMetrics] = None
+    error_message: Optional[str] = None
+    trades_count: int = 0
+    rejected_trades_count: int = 0
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None

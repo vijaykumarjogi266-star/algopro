@@ -16,6 +16,11 @@ from services.backtest_engine.contracts import (
     ReproducibilityRecord,
     BacktestMetrics,
     TradeRecord,
+    CostModelConfig,
+    SlippageModelConfig,
+    ExperimentDefinition,
+    ExperimentRun,
+    ExperimentStatus,
 )
 
 
@@ -49,6 +54,34 @@ class BacktestRunStore:
         conn = self._get_connection()
         with conn:
             conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS experiments (
+                experiment_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                strategy_id TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                dataset_id TEXT NOT NULL,
+                dataset_version TEXT NOT NULL,
+                dataset_checksum TEXT NOT NULL,
+                universe TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                parameters TEXT NOT NULL,
+                risk_policy_version TEXT NOT NULL,
+                cost_model TEXT NOT NULL,
+                slippage_model TEXT NOT NULL,
+                initial_capital REAL NOT NULL,
+                seed INTEGER NOT NULL DEFAULT 42,
+                code_revision TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'CREATED',
+                created_at TEXT NOT NULL
+            )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_exp_fingerprint ON experiments(fingerprint)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_exp_strategy ON experiments(strategy_id)")
             conn.execute("""
             CREATE TABLE IF NOT EXISTS backtest_runs (
                 experiment_id TEXT PRIMARY KEY,
@@ -176,3 +209,107 @@ class BacktestRunStore:
         cur = conn.execute("SELECT * FROM backtest_runs WHERE experiment_id = ?", (experiment_id,))
         row = cur.fetchone()
         return dict(row) if row else None
+
+    def _experiment_from_row(self, row: sqlite3.Row) -> ExperimentDefinition:
+        cost_cfg = json.loads(row["cost_model"])
+        slip_cfg = json.loads(row["slippage_model"])
+        return ExperimentDefinition(
+            experiment_id=row["experiment_id"],
+            name=row["name"],
+            description=row["description"] or "",
+            strategy_id=row["strategy_id"],
+            strategy_version=row["strategy_version"],
+            dataset_id=row["dataset_id"],
+            dataset_version=row["dataset_version"],
+            dataset_checksum=row["dataset_checksum"],
+            universe=json.loads(row["universe"]),
+            timeframe=row["timeframe"],
+            start_date=datetime.fromisoformat(row["start_date"]),
+            end_date=datetime.fromisoformat(row["end_date"]),
+            parameters=json.loads(row["parameters"]),
+            risk_policy_version=row["risk_policy_version"],
+            cost_model=CostModelConfig(**cost_cfg),
+            slippage_model=SlippageModelConfig(**slip_cfg),
+            initial_capital=float(row["initial_capital"]),
+            seed=int(row["seed"]),
+            code_revision=row["code_revision"],
+            fingerprint=row["fingerprint"],
+            status=ExperimentStatus(row["status"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def save_experiment(self, exp: ExperimentDefinition) -> None:
+        """Saves or updates an experiment definition."""
+        conn = self._get_connection()
+        cost_json = exp.cost_model.model_dump_json() if hasattr(exp.cost_model, "model_dump_json") else json.dumps(exp.cost_model.dict())
+        slip_json = exp.slippage_model.model_dump_json() if hasattr(exp.slippage_model, "model_dump_json") else json.dumps(exp.slippage_model.dict())
+        with conn:
+            conn.execute("""
+            INSERT OR REPLACE INTO experiments (
+                experiment_id, name, description, strategy_id, strategy_version,
+                dataset_id, dataset_version, dataset_checksum, universe, timeframe,
+                start_date, end_date, parameters, risk_policy_version,
+                cost_model, slippage_model, initial_capital, seed,
+                code_revision, fingerprint, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                exp.experiment_id,
+                exp.name,
+                exp.description,
+                exp.strategy_id,
+                exp.strategy_version,
+                exp.dataset_id,
+                exp.dataset_version,
+                exp.dataset_checksum,
+                json.dumps(exp.universe),
+                exp.timeframe,
+                exp.start_date.isoformat(),
+                exp.end_date.isoformat(),
+                json.dumps(exp.parameters),
+                exp.risk_policy_version,
+                cost_json,
+                slip_json,
+                exp.initial_capital,
+                exp.seed,
+                exp.code_revision,
+                exp.fingerprint,
+                exp.status.value,
+                exp.created_at.isoformat(),
+            ))
+
+    def get_experiment(self, experiment_id: str) -> Optional[ExperimentDefinition]:
+        """Retrieves experiment definition by experiment_id."""
+        conn = self._get_connection()
+        cur = conn.execute("SELECT * FROM experiments WHERE experiment_id = ?", (experiment_id,))
+        row = cur.fetchone()
+        return self._experiment_from_row(row) if row else None
+
+    def get_experiment_by_fingerprint(self, fingerprint: str) -> Optional[ExperimentDefinition]:
+        """Retrieves experiment definition by deterministic fingerprint for idempotency."""
+        conn = self._get_connection()
+        cur = conn.execute("SELECT * FROM experiments WHERE fingerprint = ? ORDER BY created_at DESC LIMIT 1", (fingerprint,))
+        row = cur.fetchone()
+        return self._experiment_from_row(row) if row else None
+
+    def list_experiments(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        status: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+    ) -> List[ExperimentDefinition]:
+        """Lists experiments with optional filtering and pagination."""
+        conn = self._get_connection()
+        query = "SELECT * FROM experiments WHERE 1=1"
+        params: List[Any] = []
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if strategy_id:
+            query += " AND strategy_id = ?"
+            params.append(strategy_id)
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        cur = conn.execute(query, tuple(params))
+        return [self._experiment_from_row(r) for r in cur.fetchall()]
