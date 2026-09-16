@@ -18,6 +18,10 @@ from apps.api.routes.health import router as health_router
 from apps.api.routes.system import router as system_router
 from apps.api.routes.data import router as data_router
 from apps.api.routes.experiments import router as experiments_router
+from apps.api.routes.datasets import router as datasets_router
+from apps.api.routes.replay import router as replay_router
+from apps.api.routes.paper_trading import router as paper_trading_router
+from apps.api.routes.brokers import router as brokers_router
 from apps.api.routes.research_ui import router as research_ui_router
 
 # Initialize structured logging
@@ -82,6 +86,10 @@ app.include_router(health_router, prefix=settings.API_V1_PREFIX)
 app.include_router(system_router, prefix=settings.API_V1_PREFIX)
 app.include_router(data_router, prefix=settings.API_V1_PREFIX)
 app.include_router(experiments_router, prefix=settings.API_V1_PREFIX)
+app.include_router(datasets_router, prefix=settings.API_V1_PREFIX)
+app.include_router(replay_router, prefix=settings.API_V1_PREFIX)
+app.include_router(paper_trading_router, prefix=settings.API_V1_PREFIX)
+app.include_router(brokers_router, prefix=settings.API_V1_PREFIX)
 app.include_router(research_ui_router)
 
 
