@@ -135,6 +135,30 @@ class ExecutionLifecycleManager:
         })
         return order
 
+    def calculate_order_outflow(
+        self,
+        side: OrderSide,
+        quantity: int,
+        price: float,
+        is_intraday: bool = True,
+    ) -> float:
+        """Calculates expected total cash outflow (net traded value + slippage + costs) for an order."""
+        if side != OrderSide.BUY:
+            return 0.0
+
+        fill_price, _ = self.slippage_calculator.calculate_fill_price(
+            side=side,
+            base_price=price,
+        )
+        costs = self.cost_calculator.calculate_transaction_costs(
+            side=side,
+            quantity=quantity,
+            price=fill_price,
+            is_intraday=is_intraday,
+        )
+        net_traded_value = round(quantity * fill_price, 4)
+        return round(net_traded_value + costs, 4)
+
     def evaluate_risk(
         self,
         order: ExecutionOrder,
@@ -142,8 +166,9 @@ class ExecutionLifecycleManager:
         current_daily_loss_pct: float = 0.0,
         current_drawdown_pct: float = 0.0,
         current_open_positions_count: int = 0,
+        available_cash: Optional[float] = None,
     ) -> ExecutionOrder:
-        """Step 2 & 3: Evaluates proposal via independent RiskEngine.
+        """Step 2 & 3: Evaluates proposal via independent RiskEngine and cash solvency checks.
         
         Transitions:
         ORDER_PROPOSED -> RISK_CHECK_EVALUATED -> ORDER_ACCEPTED (if approved)
@@ -154,7 +179,7 @@ class ExecutionLifecycleManager:
 
         order.transition_to(OrderLifecycleState.RISK_CHECK_EVALUATED, reason="Submitting to Risk Engine")
 
-        # Independent Risk Engine evaluation
+        # 1. Independent Risk Engine evaluation (portfolio-level risk caps)
         risk_result: RiskEvaluationResult = self.risk_engine.evaluate(
             symbol=order.symbol,
             price=order.proposed_price,
@@ -166,13 +191,7 @@ class ExecutionLifecycleManager:
             current_open_positions_count=current_open_positions_count,
         )
 
-        if risk_result.is_approved:
-            order.transition_to(
-                OrderLifecycleState.ORDER_ACCEPTED,
-                reason="Risk Engine approved order",
-                approved_quantity=risk_result.approved_quantity,
-            )
-        else:
+        if not risk_result.is_approved:
             order.rejection_code = (
                 risk_result.rejection_code.value
                 if hasattr(risk_result.rejection_code, "value")
@@ -184,6 +203,35 @@ class ExecutionLifecycleManager:
                 reason=risk_result.rejection_reason,
                 rejection_code=order.rejection_code,
             )
+            return order
+
+        # 2. Cash Solvency Pre-Trade Evaluation (BUY orders)
+        if available_cash is not None and order.side == OrderSide.BUY:
+            required_outflow = self.calculate_order_outflow(
+                side=order.side,
+                quantity=order.quantity,
+                price=order.proposed_price,
+            )
+            if available_cash < required_outflow:
+                order.rejection_code = RiskRejectionCode.INSUFFICIENT_CASH.value
+                order.rejection_reason = (
+                    f"Insufficient available cash: required INR {required_outflow:.2f} "
+                    f"(trade + slippage + costs) exceeds available cash INR {available_cash:.2f}"
+                )
+                order.transition_to(
+                    OrderLifecycleState.ORDER_REJECTED,
+                    reason=order.rejection_reason,
+                    rejection_code=order.rejection_code,
+                    required_outflow=required_outflow,
+                    available_cash=available_cash,
+                )
+                return order
+
+        order.transition_to(
+            OrderLifecycleState.ORDER_ACCEPTED,
+            reason="Risk Engine approved order",
+            approved_quantity=risk_result.approved_quantity,
+        )
 
         return order
 

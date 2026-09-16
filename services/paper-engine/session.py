@@ -132,6 +132,11 @@ class PaperPortfolio(BaseModel):
 
         if fill.side == OrderSide.BUY:
             total_outflow = fill.net_traded_value + fill.transaction_costs
+            if self.cash < total_outflow:
+                raise ValueError(
+                    f"Defensive cash invariant violation: Available cash INR {self.cash:.2f} "
+                    f"is insufficient for required outflow INR {total_outflow:.2f}"
+                )
             self.cash = round(self.cash - total_outflow, 4)
 
             pos = self.positions.get(sym)
@@ -385,13 +390,14 @@ class PaperTradingEngine:
                 target_price=target_price,
             )
 
-            # 2. Risk check against session portfolio metrics
+            # 2. Risk check against session portfolio metrics & cash solvency
             evaluated = self.lifecycle_manager.evaluate_risk(
                 order,
                 current_portfolio_value=session.portfolio.total_equity,
                 current_daily_loss_pct=0.0,
                 current_drawdown_pct=session.portfolio.max_drawdown_pct,
                 current_open_positions_count=len(session.portfolio.positions),
+                available_cash=session.portfolio.cash,
             )
 
             session.orders.append(evaluated)

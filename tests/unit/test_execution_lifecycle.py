@@ -141,3 +141,33 @@ def test_cancellation_and_failure():
     order3 = manager.propose_order("WIPRO", OrderSide.BUY, 10, 450.0, stop_loss=440.0)
     failed = manager.fail_order(order3, reason="Exchange network timeout")
     assert failed.state == OrderLifecycleState.ORDER_FAILED
+
+
+def test_cash_solvency_risk_evaluation():
+    """Verify pre-trade cash solvency validation in ExecutionLifecycleManager."""
+    manager = ExecutionLifecycleManager()
+
+    # Calculate exact outflow
+    outflow = manager.calculate_order_outflow(OrderSide.BUY, 10, 2000.0)
+    assert outflow > 20000.0  # Includes slippage and fees
+
+    order = manager.propose_order("TCS", OrderSide.BUY, 10, 2000.0, stop_loss=1900.0)
+
+    # 1. Reject if cash is less than required outflow
+    evaluated_reject = manager.evaluate_risk(
+        order,
+        current_portfolio_value=1_000_000.0,
+        available_cash=10_000.0,
+    )
+    assert evaluated_reject.state == OrderLifecycleState.ORDER_REJECTED
+    assert evaluated_reject.rejection_code == RiskRejectionCode.INSUFFICIENT_CASH.value
+    assert "Insufficient available cash" in evaluated_reject.rejection_reason
+
+    # 2. Accept if cash is sufficient
+    order_ok = manager.propose_order("TCS", OrderSide.BUY, 10, 2000.0, stop_loss=1900.0)
+    evaluated_ok = manager.evaluate_risk(
+        order_ok,
+        current_portfolio_value=1_000_000.0,
+        available_cash=30_000.0,
+    )
+    assert evaluated_ok.state == OrderLifecycleState.ORDER_ACCEPTED
