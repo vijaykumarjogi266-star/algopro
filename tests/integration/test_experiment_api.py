@@ -234,11 +234,11 @@ async def test_failed_execution_visibility_and_audit(client: AsyncClient, fresh_
     final_st = await client.get(f"/api/v1/experiments/{exp_id}/runs/{run_id}")
     assert final_st.json()["status"] == "FAILED"
 
-    # Verify audit contains RISK_REJECT
+    # Verify audit contains RISK_REJECT / RISK_REJECTED
     audit_res = await client.get(f"/api/v1/experiments/{exp_id}/runs/{run_id}/audit")
     assert audit_res.status_code == 200
     events = audit_res.json()
-    assert any(e["event_type"] == "RISK_REJECT" for e in events)
+    assert any(e["event_type"] in ("RISK_REJECT", "RISK_REJECTED") for e in events)
 
 
 @pytest.mark.asyncio

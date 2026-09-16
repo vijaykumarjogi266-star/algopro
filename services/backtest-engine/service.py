@@ -34,10 +34,15 @@ from services.risk_engine.contracts import HardRiskLimits, RiskRejectionCode
 class BacktestService:
     """Coordinates backtest submission, lifecycle management, risk enforcement, and audit."""
 
-    def __init__(self, store: Optional[BacktestRunStore] = None, max_workers: int = 2):
+    def __init__(
+        self,
+        store: Optional[BacktestRunStore] = None,
+        max_workers: int = 2,
+        risk_engine: Optional[RiskEngine] = None,
+    ):
         self.store = store or BacktestRunStore()
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.risk_engine = RiskEngine()
+        self.risk_engine = risk_engine or RiskEngine()
 
     def submit_backtest(
         self,
@@ -127,11 +132,39 @@ class BacktestService:
                 exp_def.status = ExperimentStatus.RUNNING
                 self.store.save_experiment(exp_def)
 
-            # Mock simulation: simulate 1 order proposal and 1 risk evaluation
+            # Full lifecycle simulation: Signal -> Proposal -> Risk Check -> Fill -> Portfolio State
             order_price = 2500.0
             order_qty = 10
             stop_loss = 2450.0
 
+            strat_id = exp_def.strategy_id if exp_def else "Canonical_SMA"
+
+            # 1. Signal Generated
+            self.store.append_audit_event(
+                experiment_id,
+                "SIGNAL_GENERATED",
+                {
+                    "strategy_id": strat_id,
+                    "symbol": repro.universe[0],
+                    "signal_type": "ENTRY_LONG",
+                    "timestamp": repro.start_date.isoformat(),
+                }
+            )
+
+            # 2. Order Proposed
+            self.store.append_audit_event(
+                experiment_id,
+                "ORDER_PROPOSED",
+                {
+                    "symbol": repro.universe[0],
+                    "quantity": order_qty,
+                    "price": order_price,
+                    "stop_loss": stop_loss,
+                    "side": "BUY",
+                }
+            )
+
+            # 3. Risk Evaluation
             risk_eval = self.risk_engine.evaluate(
                 symbol=repro.universe[0],
                 price=order_price,
@@ -143,12 +176,42 @@ class BacktestService:
                 current_open_positions_count=0,
             )
 
+            self.store.append_audit_event(
+                experiment_id,
+                "RISK_CHECK_EVALUATED",
+                {
+                    "is_approved": risk_eval.is_approved,
+                    "symbol": repro.universe[0],
+                    "code": risk_eval.rejection_code.value if risk_eval.rejection_code else "APPROVED",
+                }
+            )
+
             if risk_eval.is_approved:
+                # 4. Order Filled
                 self.store.append_audit_event(
                     experiment_id,
-                    "ORDER_APPROVED",
-                    {"symbol": repro.universe[0], "quantity": order_qty, "price": order_price}
+                    "ORDER_FILLED",
+                    {
+                        "symbol": repro.universe[0],
+                        "quantity": order_qty,
+                        "fill_price": order_price,
+                        "costs": 150.0,
+                        "slippage": 25.0,
+                    }
                 )
+
+                # 5. Portfolio State Updated
+                new_cash = repro.initial_capital - (order_qty * order_price) - 175.0
+                self.store.append_audit_event(
+                    experiment_id,
+                    "PORTFOLIO_STATE_UPDATED",
+                    {
+                        "cash": new_cash,
+                        "positions": {repro.universe[0]: order_qty},
+                        "total_value": repro.initial_capital - 175.0,
+                    }
+                )
+
                 metrics = BacktestMetrics(
                     total_return_pct=4.25,
                     cagr_pct=8.5,
@@ -170,14 +233,18 @@ class BacktestService:
                     worst_day_pnl=0.0,
                 )
                 self.store.update_status(experiment_id, "COMPLETED", metrics=metrics)
-                self.store.append_audit_event(experiment_id, "JOB_COMPLETED", {"metrics": metrics.model_dump() if hasattr(metrics, "model_dump") else metrics.dict()})
+                self.store.append_audit_event(
+                    experiment_id,
+                    "JOB_COMPLETED",
+                    {"metrics": metrics.model_dump() if hasattr(metrics, "model_dump") else metrics.dict()}
+                )
                 if exp_def:
                     exp_def.status = ExperimentStatus.COMPLETED
                     self.store.save_experiment(exp_def)
             else:
                 self.store.append_audit_event(
                     experiment_id,
-                    "RISK_REJECT",
+                    "RISK_REJECTED",
                     {"code": risk_eval.rejection_code.value, "reason": risk_eval.rejection_reason}
                 )
                 self.store.update_status(experiment_id, "FAILED")

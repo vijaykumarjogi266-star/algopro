@@ -119,3 +119,29 @@ class AuditEventResponse(BaseModel):
 class ExperimentCompareRequest(BaseModel):
     baseline_experiment_id: str = Field(..., min_length=1, description="Baseline experiment ID")
     target_experiment_id: str = Field(..., min_length=1, description="Target experiment ID to compare against baseline")
+
+
+class ExperimentProvenanceResponse(BaseModel):
+    experiment_id: str
+    name: str
+    strategy_id: str
+    strategy_version: str
+    dataset_id: str
+    dataset_version: str
+    dataset_checksum: str
+    universe: List[str]
+    timeframe: str
+    start_date: datetime
+    end_date: datetime
+    parameters: Dict[str, Any]
+    initial_capital: float
+    seed: int
+    code_revision: str
+    fingerprint: str
+    cost_model: Dict[str, Any]
+    slippage_model: Dict[str, Any]
+    indicator_versions: Dict[str, str] = Field(default_factory=lambda: {"SMA": "1.0", "RSI": "1.0", "ATR": "1.0"})
+    reproducibility_hash: Optional[str] = None
+    created_at: str
+    is_read_only: bool = True
+

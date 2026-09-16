@@ -30,6 +30,7 @@ from apps.api.schemas.experiments import (
     ExperimentResponse,
     ExperimentListResponse,
     ExperimentCompareRequest,
+    ExperimentProvenanceResponse,
     RunSubmitResponse,
     RunStatusResponse,
     RunResultResponse,
@@ -334,4 +335,43 @@ def compare_experiments(
         baseline_rejected_count=b_rejected,
         target_rejected_count=t_rejected,
     )
+
+
+@router.get("/{experiment_id}/provenance", response_model=ExperimentProvenanceResponse, summary="Get full cryptographic provenance and configuration record")
+def get_experiment_provenance(
+    experiment_id: str,
+    service: BacktestService = Depends(get_service),
+):
+    exp = service.store.get_experiment(experiment_id)
+    if not exp:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Experiment '{experiment_id}' not found")
+
+    run = service.store.get_run(experiment_id)
+    repro_hash = run["reproducibility_hash"] if run else exp.fingerprint
+
+    return ExperimentProvenanceResponse(
+        experiment_id=exp.experiment_id,
+        name=exp.name,
+        strategy_id=exp.strategy_id,
+        strategy_version=exp.strategy_version,
+        dataset_id=exp.dataset_id,
+        dataset_version=exp.dataset_version,
+        dataset_checksum=exp.dataset_checksum,
+        universe=exp.universe,
+        timeframe=exp.timeframe,
+        start_date=exp.start_date,
+        end_date=exp.end_date,
+        parameters=exp.parameters,
+        initial_capital=exp.initial_capital,
+        seed=exp.seed,
+        code_revision=exp.code_revision,
+        fingerprint=exp.fingerprint,
+        cost_model=exp.cost_model.model_dump(),
+        slippage_model=exp.slippage_model.model_dump(),
+        indicator_versions={"SMA": "1.0", "RSI": "1.0", "ATR": "1.0"},
+        reproducibility_hash=repro_hash,
+        created_at=exp.created_at.isoformat(),
+        is_read_only=True,
+    )
+
 

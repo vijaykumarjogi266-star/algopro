@@ -160,3 +160,18 @@ async def test_compare_view_elements(client: AsyncClient):
     assert 'id="cmp-metrics-tbody"' in text
     assert "Strictly Descriptive • Non-Ranking" in text
 
+
+@pytest.mark.asyncio
+async def test_audit_view_elements(client: AsyncClient):
+    res = await client.get("/research/audit")
+    assert res.status_code == 200
+    text = res.text
+    assert 'id="view-audit"' in text
+    assert 'id="audit-exp-select"' in text
+    assert 'id="audit-provenance-card"' in text
+    assert 'id="audit-timeline-card"' in text
+    assert 'id="audit-events-tbody"' in text
+    assert "exportAuditJson" in text
+    assert "Immutable Ledger • Zero-Mutation Enforced" in text
+
+

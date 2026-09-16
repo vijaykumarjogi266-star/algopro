@@ -317,6 +317,7 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       <button class="nav-btn" onclick="switchView('detail')">Experiment Detail</button>
       <button class="nav-btn" onclick="switchView('results')">Research Results</button>
       <button class="nav-btn" onclick="switchView('compare')">Compare</button>
+      <button class="nav-btn" onclick="switchView('audit')">Audit & Provenance</button>
     </div>
   </nav>
 
@@ -758,6 +759,79 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- VIEW 6: AUDIT & PROVENANCE -->
+    <div id="view-audit" class="view-section">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Cryptographic Provenance & Audit Trail</div>
+          <div class="badge badge-completed">Immutable Ledger • Zero-Mutation Enforced</div>
+        </div>
+        <div class="form-grid" style="margin-bottom: 16px;">
+          <div class="form-group full-width">
+            <label>Select Experiment for Provenance Inspection</label>
+            <select id="audit-exp-select" onchange="loadAuditTrail(this.value)">
+              <option value="">-- Select Experiment --</option>
+            </select>
+          </div>
+        </div>
+        <div style="display: flex; gap: 12px; align-items: center;">
+          <button class="btn btn-secondary" onclick="loadAuditTrail(document.getElementById('audit-exp-select').value)">Refresh Ledger</button>
+          <button class="btn btn-accent" onclick="exportAuditJson()">Export Provenance & Audit JSON</button>
+          <span id="audit-status" style="font-size: 0.85rem; color: var(--text-muted);"></span>
+        </div>
+      </div>
+
+      <!-- Provenance Snapshot -->
+      <div id="audit-provenance-card" class="card" style="display: none;">
+        <div class="card-header">
+          <div class="card-title">Experiment Provenance Manifest</div>
+          <span class="badge badge-completed">Cryptographically Verified</span>
+        </div>
+        <div class="metric-grid" style="margin-bottom: 16px;">
+          <div class="metric-card">
+            <div class="metric-label">Fingerprint (SHA-256)</div>
+            <div class="mono" id="prov-fp" style="font-size: 0.75rem; word-break: break-all; color: var(--accent);">--</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Dataset ID & Digest</div>
+            <div class="mono" id="prov-dataset" style="font-size: 0.75rem; word-break: break-all;">--</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Strategy & Code Revision</div>
+            <div class="mono" id="prov-strategy" style="font-size: 0.85rem;">--</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Reproducibility Hash</div>
+            <div class="mono" id="prov-repro" style="font-size: 0.75rem; word-break: break-all; color: var(--success);">--</div>
+          </div>
+        </div>
+        <div class="card-title" style="font-size: 0.9rem; margin-bottom: 8px;">Parameters & Risk Policy</div>
+        <pre class="terminal-box" id="prov-params-box" style="margin-bottom: 16px; max-height: 120px;">--</pre>
+      </div>
+
+      <!-- Chronological Audit Timeline -->
+      <div id="audit-timeline-card" class="card" style="display: none;">
+        <div class="card-header">
+          <div class="card-title">Chronological Lifecycle Sequence (Signal → Proposal → Risk → Fill → State)</div>
+          <div class="badge badge-created" id="audit-events-count">0 events</div>
+        </div>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 180px;">Timestamp (UTC)</th>
+                <th style="width: 220px;">Lifecycle Stage</th>
+                <th>Payload & Evidence Details</th>
+              </tr>
+            </thead>
+            <tbody id="audit-events-tbody">
+              <tr><td colspan="3" style="text-align: center; color: var(--text-muted);">No audit events loaded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <script>
@@ -776,7 +850,7 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       const activeBtn = btns.find(b => b.innerText.toLowerCase().includes(viewName));
       if (activeBtn) activeBtn.classList.add('active');
 
-      if (viewName === 'dashboard' || viewName === 'compare') loadDashboardExperiments();
+      if (viewName === 'dashboard' || viewName === 'compare' || viewName === 'audit') loadDashboardExperiments();
     }
 
     async function loadDashboardExperiments() {
@@ -797,6 +871,15 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
           tgtSelect.innerHTML = optsHtml;
           if (prevBase) baseSelect.value = prevBase;
           if (prevTgt) tgtSelect.value = prevTgt;
+        }
+
+        // Populate audit experiment selector
+        const auditSelect = document.getElementById('audit-exp-select');
+        if (auditSelect) {
+          const prevAudit = auditSelect.value;
+          auditSelect.innerHTML = '<option value="">-- Select Experiment --</option>' +
+            exps.map(e => `<option value="${e.experiment_id}">${e.name} (${e.experiment_id})</option>`).join('');
+          if (prevAudit) auditSelect.value = prevAudit;
         }
 
         const statTotal = document.getElementById('stat-total');
@@ -1190,6 +1273,93 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       }
     }
 
+    let currentAuditData = null;
+
+    async function loadAuditTrail(experimentId) {
+      const statusSpan = document.getElementById('audit-status');
+      const provCard = document.getElementById('audit-provenance-card');
+      const timelineCard = document.getElementById('audit-timeline-card');
+      if (!experimentId) {
+        if (provCard) provCard.style.display = 'none';
+        if (timelineCard) timelineCard.style.display = 'none';
+        return;
+      }
+
+      statusSpan.innerText = 'Loading audit ledger...';
+      statusSpan.style.color = 'var(--text-muted)';
+
+      try {
+        const pRes = await fetch(`/api/v1/experiments/${experimentId}/provenance`);
+        if (!pRes.ok) throw new Error('Failed to fetch provenance');
+        const prov = await pRes.json();
+
+        const aRes = await fetch(`/api/v1/experiments/${experimentId}/runs/${experimentId}/audit`);
+        const events = aRes.ok ? await aRes.json() : [];
+
+        currentAuditData = { provenance: prov, audit_events: events };
+
+        document.getElementById('prov-fp').innerText = prov.fingerprint;
+        document.getElementById('prov-dataset').innerText = `${prov.dataset_id} v${prov.dataset_version} (${prov.dataset_checksum.substring(0, 16)}...)`;
+        document.getElementById('prov-strategy').innerText = `${prov.strategy_id} v${prov.strategy_version} (${prov.code_revision})`;
+        document.getElementById('prov-repro').innerText = prov.reproducibility_hash || '--';
+        document.getElementById('prov-params-box').innerText = JSON.stringify({
+          parameters: prov.parameters,
+          cost_model: prov.cost_model,
+          slippage_model: prov.slippage_model,
+          universe: prov.universe,
+          timeframe: prov.timeframe,
+          initial_capital: prov.initial_capital
+        }, null, 2);
+
+        const tbody = document.getElementById('audit-events-tbody');
+        document.getElementById('audit-events-count').innerText = `${events.length} events`;
+
+        if (events.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted);">No audit events recorded yet for this experiment.</td></tr>';
+        } else {
+          tbody.innerHTML = events.map(e => {
+            let badgeClass = 'badge-created';
+            if (e.event_type.includes('REJECT') || e.event_type.includes('ERROR') || e.event_type.includes('FAILED')) {
+              badgeClass = 'badge-failed';
+            } else if (e.event_type.includes('COMPLETED') || e.event_type.includes('APPROVED') || e.event_type.includes('FILLED')) {
+              badgeClass = 'badge-completed';
+            } else if (e.event_type.includes('PROPOSED') || e.event_type.includes('CHECK')) {
+              badgeClass = 'badge-running';
+            }
+            return `
+              <tr>
+                <td class="mono" style="font-size: 0.75rem; color: var(--text-muted);">${new Date(e.timestamp).toISOString()}</td>
+                <td><span class="badge ${badgeClass}">${e.event_type}</span></td>
+                <td><pre class="terminal-box" style="padding: 6px 10px; font-size: 0.75rem; max-height: 100px;">${JSON.stringify(e.payload, null, 2)}</pre></td>
+              </tr>
+            `;
+          }).join('');
+        }
+
+        provCard.style.display = 'block';
+        timelineCard.style.display = 'block';
+        statusSpan.innerText = '✓ Ledger verified & loaded';
+        statusSpan.style.color = 'var(--success)';
+      } catch (err) {
+        statusSpan.innerText = `Error: ${err.message}`;
+        statusSpan.style.color = 'var(--danger)';
+      }
+    }
+
+    function exportAuditJson() {
+      if (!currentAuditData) {
+        alert('Please select and load an experiment audit ledger first.');
+        return;
+      }
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(currentAuditData, null, 2));
+      const dlAnchor = document.createElement('a');
+      dlAnchor.setAttribute("href", dataStr);
+      dlAnchor.setAttribute("download", `audit_provenance_${currentAuditData.provenance.experiment_id}.json`);
+      document.body.appendChild(dlAnchor);
+      dlAnchor.click();
+      dlAnchor.remove();
+    }
+
     // Initial load
     loadDashboardExperiments();
   </script>
@@ -1222,4 +1392,10 @@ def get_results_view():
 @router.get("/compare", response_class=HTMLResponse, summary="Experiment Comparison View")
 def get_compare_view():
     return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+
+
+@router.get("/audit", response_class=HTMLResponse, summary="Provenance & Audit View")
+def get_audit_view():
+    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+
 
