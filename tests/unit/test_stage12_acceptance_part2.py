@@ -5,6 +5,7 @@ Algo Lab — Stage 12 Acceptance Tests (Part 2: AT-256 to AT-280)
 import json
 import math
 import pytest
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone, timedelta
 from services.derivatives_engine import (
     OptionContract,
@@ -26,7 +27,9 @@ from services.derivatives_engine import (
     SettlementRuleError,
     VolatilitySurfaceArbitrageError,
     ASTIsolationError,
+    DerivativesAuditManifest,
 )
+from services.derivatives_engine.pricing_models import BSMPricingModel
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -383,3 +386,142 @@ def test_at_279_stage9_10_11_regression_gate():
 def test_at_280_full_combined_suite_pass_gate():
     """AT-280: Full Combined Suite Pass Gate placeholder assertion."""
     assert True
+
+
+def test_at_281_volatility_surface_finite_grid_numerical_arbitrage_validation():
+    """AT-281: Surface finite-grid numerical arbitrage validation (10-point sub-grid)."""
+    surf = VolatilitySurface(spot=100.0, risk_free_rate=0.05, dividend_yield=0.01)
+    # Valid call prices generated via Black-Scholes at vol=0.20
+    c90 = BSMPricingModel.calculate_price(100.0, 90.0, 1.0, 0.05, 0.01, 0.20, OptionType.CALL)
+    c100 = BSMPricingModel.calculate_price(100.0, 100.0, 1.0, 0.05, 0.01, 0.20, OptionType.CALL)
+    c110 = BSMPricingModel.calculate_price(100.0, 110.0, 1.0, 0.05, 0.01, 0.20, OptionType.CALL)
+    call_prices_valid = {90.0: c90, 100.0: c100, 110.0: c110}
+    put_prices_valid = {}
+    surf.validate_surface(call_prices_valid, put_prices_valid, time_to_expiry=1.0)
+
+    # Inconsistent non-monotonic call prices
+    call_prices_invalid = {90.0: c100, 100.0: c90, 110.0: c110}
+    with pytest.raises(VolatilitySurfaceArbitrageError):
+        surf.validate_surface(call_prices_invalid, put_prices_valid, time_to_expiry=1.0)
+
+
+def test_at_282_strict_span_fail_closed_validation():
+    """AT-282: Strict SPAN fail-closed validation across failure/success cases."""
+    span_file = SPANParameterFile(
+        file_version="v1.0",
+        effective_timestamp=datetime.now(timezone.utc),
+        source_id="NSE_CLEARING",
+        checksum_sha256="valid_checksum",
+        risk_arrays={
+            "NIFTY": [0.0] * 16,
+        },
+        price_scan_range={},
+        volatility_scan_range={},
+    )
+
+    # 1. Missing symbol
+    pos_missing = [{"symbol": "BANKNIFTY", "quantity": 10, "underlying_price": 100.0}]
+    with pytest.raises(SPANParameterError):
+        SPANMarginEngine.calculate_margin("ACC1", pos_missing, span_file, 100000.0, datetime.now(timezone.utc))
+
+    # 2. 15 scenarios (invalid count)
+    span_file_15 = SPANParameterFile(
+        file_version="v1.0",
+        effective_timestamp=datetime.now(timezone.utc),
+        source_id="NSE_CLEARING",
+        checksum_sha256="valid_checksum",
+        risk_arrays={"NIFTY": [0.0] * 15},
+        price_scan_range={},
+        volatility_scan_range={},
+    )
+    pos = [{"symbol": "NIFTY", "quantity": 10, "underlying_price": 100.0}]
+    with pytest.raises(SPANParameterError):
+        SPANMarginEngine.calculate_margin("ACC1", pos, span_file_15, 100000.0, datetime.now(timezone.utc))
+
+    # 3. Non-finite (NaN) scenario
+    span_file_nan = SPANParameterFile(
+        file_version="v1.0",
+        effective_timestamp=datetime.now(timezone.utc),
+        source_id="NSE_CLEARING",
+        checksum_sha256="valid_checksum",
+        risk_arrays={"NIFTY": [0.0] * 15 + [float("nan")]},
+        price_scan_range={},
+        volatility_scan_range={},
+    )
+    with pytest.raises(SPANParameterError):
+        SPANMarginEngine.calculate_margin("ACC1", pos, span_file_nan, 100000.0, datetime.now(timezone.utc))
+
+    # 4. Valid 16-scenario succeeds
+    report = SPANMarginEngine.calculate_margin("ACC1", pos, span_file, 100000.0, datetime.now(timezone.utc))
+    assert report.total_margin_required >= 0.0
+
+
+def test_at_283_ai_advisory_snapshot_immutability_and_isolation():
+    """AT-283: AI immutable snapshot isolation (INV-61)."""
+    service = DerivativesService(environment="RESEARCH")
+    contract = OptionContract(
+        symbol="NIFTY26SEP18000CE",
+        underlying_symbol="NIFTY",
+        strike_price=100.0,
+        expiration_date=datetime(2026, 12, 31, tzinfo=timezone.utc),
+        option_type=OptionType.CALL,
+    )
+    res = service.price_option(contract, underlying_price=100.0, time_to_expiry_years=1.0, risk_free_rate=0.05, dividend_yield=0.01, volatility=0.20)
+    snap = service.create_advisory_snapshot(res)
+
+    # 1. Direct attribute mutation fails
+    with pytest.raises((FrozenInstanceError, AttributeError, TypeError)):
+        snap.underlying_price = 150.0
+
+    # 2. Deletion fails
+    with pytest.raises((FrozenInstanceError, AttributeError, TypeError)):
+        del snap.underlying_price
+
+    # 3. Nested mutation fails
+    with pytest.raises((FrozenInstanceError, AttributeError, TypeError)):
+        snap.contract.strike_price = 120.0
+
+    # 4. Gateway handle check
+    assert not hasattr(snap, "_service")
+    assert not hasattr(snap, "_gateway")
+
+
+def test_at_284_cryptographic_option_audit_provenance_reproducibility():
+    """AT-284: Cryptographic option audit provenance reproducibility (INV-62)."""
+    service = DerivativesService(environment="RESEARCH")
+    contract = OptionContract(
+        symbol="NIFTY26SEP18000CE",
+        underlying_symbol="NIFTY",
+        strike_price=100.0,
+        expiration_date=datetime(2026, 12, 31, tzinfo=timezone.utc),
+        option_type=OptionType.CALL,
+    )
+    res = service.price_option(contract, underlying_price=100.0, time_to_expiry_years=1.0, risk_free_rate=0.05, dividend_yield=0.01, volatility=0.20)
+    manifest = service.generate_audit_manifest("MAN001", [res])
+
+    # 1. Valid manifest verification succeeds
+    assert service.verify_manifest(manifest) is True
+
+    # 2. Fabricated hash fails
+    fake_manifest = DerivativesAuditManifest(
+        manifest_id=manifest.manifest_id,
+        timestamp=manifest.timestamp,
+        model_version=manifest.model_version,
+        dataset_version=manifest.dataset_version,
+        pricing_results_summary=manifest.pricing_results_summary,
+        span_margin_summary=manifest.span_margin_summary,
+        manifest_hash_sha256="0" * 64,
+    )
+    assert service.verify_manifest(fake_manifest) is False
+
+
+def test_at_285_direct_volatility_surface_put_call_parity_rejection():
+    """AT-285: Direct volatility-surface put-call parity rejection."""
+    surf = VolatilitySurface(spot=100.0, risk_free_rate=0.05, dividend_yield=0.01)
+    # Dirty quote parity: C - P = 10.0 - 5.0 = 5.0, but S*e^(-qT) - K*e^(-rT) = 99.00 - 95.12 = 3.88
+    call_prices = {100.0: 10.0}
+    put_prices = {100.0: 5.0}
+
+    with pytest.raises(VolatilitySurfaceArbitrageError):
+        surf.validate_surface(call_prices, put_prices, time_to_expiry=1.0)
+

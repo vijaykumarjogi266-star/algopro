@@ -59,7 +59,7 @@ class SPANParameterFileIngestor:
 
 
 class SPANMarginEngine:
-    """Deterministic 16-Scenario SPAN Portfolio Margin Reconstruction Engine."""
+    """Deterministic 16-Scenario SPAN Portfolio Margin Reconstruction Engine (Fail-Closed)."""
 
     @staticmethod
     def calculate_margin(
@@ -70,7 +70,7 @@ class SPANMarginEngine:
         timestamp: datetime,
         exposure_margin_pct: float = 0.03,
     ) -> SPANMarginReport:
-        if available_collateral < 0.0 or math.isnan(available_collateral):
+        if available_collateral < 0.0 or math.isnan(available_collateral) or math.isinf(available_collateral):
             raise DerivativesValidationError(f"Invalid available_collateral: {available_collateral}")
 
         # Reconstruct 16-scenario losses across positions
@@ -79,22 +79,28 @@ class SPANMarginEngine:
         total_contract_value = 0.0
 
         for pos in positions:
-            sym = pos["symbol"]
+            sym = pos.get("symbol")
+            if not sym or sym not in span_file.risk_arrays:
+                raise SPANParameterError(f"FAIL CLOSED: Missing SPAN risk array for symbol '{sym}'")
+
+            arr = span_file.risk_arrays[sym]
+            if not isinstance(arr, list) or len(arr) != 16:
+                raise SPANParameterError(
+                    f"FAIL CLOSED: Invalid scenario array length for symbol '{sym}'. Expected 16, got {len(arr) if isinstance(arr, list) else type(arr)}"
+                )
+
+            for idx, val in enumerate(arr):
+                if not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+                    raise SPANParameterError(
+                        f"FAIL CLOSED: Non-finite or invalid scenario value at index {idx} for symbol '{sym}': {val}"
+                    )
+
             qty = pos["quantity"]
             nov = pos.get("nov", 0.0) * qty
             total_nov += nov
 
             und_price = pos.get("underlying_price", 100.0)
             total_contract_value += abs(qty) * und_price
-
-            # Fetch or generate 16-scenario risk array
-            if sym in span_file.risk_arrays and len(span_file.risk_arrays[sym]) == 16:
-                arr = span_file.risk_arrays[sym]
-            else:
-                # Default 16-scenario synthetic reconstruction if symbol array not explicitly mapped
-                psr = span_file.price_scan_range.get(sym, 0.05 * und_price)
-                vsr = span_file.volatility_scan_range.get(sym, 0.02)
-                arr = SPANMarginEngine._generate_synthetic_16_scenarios(und_price, psr, vsr)
 
             for i in range(16):
                 scenario_losses[i] += qty * arr[i]
@@ -117,25 +123,3 @@ class SPANMarginEngine:
             available_collateral=available_collateral,
             is_margin_call=is_margin_call,
         )
-
-    @staticmethod
-    def _generate_synthetic_16_scenarios(spot: float, psr: float, vsr: float) -> List[float]:
-        """Generates standard NSE SPAN 16 price/volatility scenario loss multipliers."""
-        return [
-            0.0,                       # Scenario 1: Price 0, Vol +VSR
-            0.0,                       # Scenario 2: Price 0, Vol -VSR
-            (1/3) * psr + vsr * spot,  # Scenario 3: +1/3 PSR, +VSR
-            (1/3) * psr - vsr * spot,  # Scenario 4: +1/3 PSR, -VSR
-            -(1/3) * psr + vsr * spot, # Scenario 5: -1/3 PSR, +VSR
-            -(1/3) * psr - vsr * spot, # Scenario 6: -1/3 PSR, -VSR
-            (2/3) * psr + vsr * spot,  # Scenario 7: +2/3 PSR, +VSR
-            (2/3) * psr - vsr * spot,  # Scenario 8: +2/3 PSR, -VSR
-            -(2/3) * psr + vsr * spot, # Scenario 9: -2/3 PSR, +VSR
-            -(2/3) * psr - vsr * spot, # Scenario 10: -2/3 PSR, -VSR
-            1.0 * psr + vsr * spot,    # Scenario 11: +1 PSR, +VSR
-            1.0 * psr - vsr * spot,    # Scenario 12: +1 PSR, -VSR
-            -1.0 * psr + vsr * spot,   # Scenario 13: -1 PSR, +VSR
-            -1.0 * psr - vsr * spot,   # Scenario 14: -1 PSR, -VSR
-            0.35 * (2.0 * psr),        # Scenario 15: +2 PSR Extreme
-            0.35 * (-2.0 * psr),       # Scenario 16: -2 PSR Extreme
-        ]

@@ -3,11 +3,14 @@ Algo Lab — Stage 12 Integrated Derivatives Engine Service Interface
 """
 
 import ast
+from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
+import unicodedata
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from services.derivatives_engine.contracts import (
     OptionContract,
     OptionGreeks,
@@ -32,6 +35,46 @@ from services.derivatives_engine.contract_registry import DerivativesContractReg
 from services.derivatives_engine.expiry_risk import ExpiryRiskMonitor
 
 
+# INV-61: Decoupled Frozen Value Objects for AI Read-Only Boundary
+@dataclass(frozen=True)
+class AdvisoryContractSnapshot:
+    symbol: str
+    underlying: str
+    strike_price: float
+    option_type: str
+    expiry_date: str
+
+
+@dataclass(frozen=True)
+class AdvisoryGreeksSnapshot:
+    delta: float
+    gamma: float
+    vega: float
+    theta: float
+    rho: float
+
+
+@dataclass(frozen=True)
+class AdvisorySPANSnapshot:
+    account_id: str
+    span_risk_requirement: float
+    exposure_margin: float
+    total_margin_required: float
+    is_margin_call: bool
+    scenario_losses: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class AdvisoryOptionSnapshot:
+    contract: AdvisoryContractSnapshot
+    underlying_price: float
+    theoretical_price: float
+    implied_volatility: float
+    greeks: AdvisoryGreeksSnapshot
+    span: Optional[AdvisorySPANSnapshot]
+    timestamp_utc: str
+
+
 PROHIBITED_MODULES = {
     "kiteconnect",
     "upstox_client",
@@ -47,6 +90,37 @@ PROHIBITED_MODULES = {
 }
 
 PROHIBITED_BUILTINS = {"eval", "exec"}
+
+
+def _canonicalize_value(val: Any) -> Any:
+    """
+    Recursively canonicalizes dictionary and sequence values according to the Stage 12 audit contract:
+    - Dict keys normalized to Unicode NFC and sorted lexicographically.
+    - Sequences preserve order; elements canonicalized recursively.
+    - Strings normalized to Unicode NFC.
+    - Floats canonicalized to 8 decimal places; non-finite floats rejected.
+    - Hash/signature fields ('content_hash', 'hmac_signature', 'manifest_hash_sha256') excluded.
+    """
+    if val is None or isinstance(val, (bool, int)):
+        return val
+    elif isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            raise ValueError(f"Non-finite float value detected in audit payload: {val}")
+        return round(val, 8)
+    elif isinstance(val, str):
+        return unicodedata.normalize("NFC", val)
+    elif isinstance(val, dict):
+        result = {}
+        for k in sorted(val.keys()):
+            k_norm = unicodedata.normalize("NFC", str(k))
+            if k_norm in ("content_hash", "hmac_signature", "manifest_hash_sha256"):
+                continue
+            result[k_norm] = _canonicalize_value(val[k])
+        return result
+    elif isinstance(val, (list, tuple)):
+        return [_canonicalize_value(item) for item in val]
+    else:
+        return unicodedata.normalize("NFC", str(val))
 
 
 class DerivativesService:
@@ -169,6 +243,48 @@ class DerivativesService:
             pricing_model_used=pricing_model,
         )
 
+    def create_advisory_snapshot(
+        self,
+        result: OptionPricingResult,
+        margin_report: Optional[SPANMarginReport] = None,
+    ) -> AdvisoryOptionSnapshot:
+        """Generates a deeply frozen, decoupled value snapshot for AI advisory consumers (INV-61)."""
+        contract_snap = AdvisoryContractSnapshot(
+            symbol=result.contract.symbol,
+            underlying=result.contract.underlying_symbol,
+            strike_price=result.contract.strike_price,
+            option_type=result.contract.option_type.value if hasattr(result.contract.option_type, "value") else str(result.contract.option_type),
+            expiry_date=result.contract.expiration_date.isoformat() if hasattr(result.contract.expiration_date, "isoformat") else str(result.contract.expiration_date),
+        )
+        greeks_snap = AdvisoryGreeksSnapshot(
+            delta=result.greeks.delta,
+            gamma=result.greeks.gamma,
+            vega=result.greeks.vega,
+            theta=result.greeks.theta,
+            rho=result.greeks.rho,
+        )
+        span_snap = None
+        if margin_report:
+            span_snap = AdvisorySPANSnapshot(
+                account_id=margin_report.account_id,
+                span_risk_requirement=margin_report.span_risk_requirement,
+                exposure_margin=margin_report.exposure_margin,
+                total_margin_required=margin_report.total_margin_required,
+                is_margin_call=margin_report.is_margin_call,
+                scenario_losses=tuple([0.0] * 16),
+            )
+
+        timestamp_str = datetime.now(timezone.utc).isoformat()
+        return AdvisoryOptionSnapshot(
+            contract=contract_snap,
+            underlying_price=result.underlying_price,
+            theoretical_price=result.theoretical_price,
+            implied_volatility=result.volatility,
+            greeks=greeks_snap,
+            span=span_snap,
+            timestamp_utc=timestamp_str,
+        )
+
     def generate_audit_manifest(
         self,
         manifest_id: str,
@@ -177,23 +293,23 @@ class DerivativesService:
         model_version: str = "v12.0",
         dataset_version: str = "v2026.1",
     ) -> DerivativesAuditManifest:
-        """Generates a canonical cryptographic audit manifest with SHA-256 digest."""
+        """Generates a canonical cryptographic audit manifest with SHA-256 digest (INV-62)."""
         pricing_summary = {}
         for res in pricing_results:
-            pricing_summary[res.contract.symbol] = round(res.theoretical_price, 6)
+            pricing_summary[res.contract.symbol] = res.theoretical_price
 
         span_summary = {}
         if margin_report:
             span_summary = {
                 "account_id": margin_report.account_id,
-                "span_risk_requirement": round(margin_report.span_risk_requirement, 6),
-                "exposure_margin": round(margin_report.exposure_margin, 6),
-                "total_margin_required": round(margin_report.total_margin_required, 6),
+                "span_risk_requirement": margin_report.span_risk_requirement,
+                "exposure_margin": margin_report.exposure_margin,
+                "total_margin_required": margin_report.total_margin_required,
                 "is_margin_call": margin_report.is_margin_call,
             }
 
         timestamp_str = datetime.now(timezone.utc).isoformat()
-        canonical_dict = {
+        raw_dict = {
             "dataset_version": dataset_version,
             "manifest_id": manifest_id,
             "model_version": model_version,
@@ -202,7 +318,8 @@ class DerivativesService:
             "timestamp": timestamp_str,
         }
 
-        canonical_json = json.dumps(canonical_dict, sort_keys=True, separators=(",", ":"))
+        canonical_dict = _canonicalize_value(raw_dict)
+        canonical_json = json.dumps(canonical_dict, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
         return DerivativesAuditManifest(
@@ -214,3 +331,23 @@ class DerivativesService:
             span_margin_summary=span_summary,
             manifest_hash_sha256=digest,
         )
+
+    @staticmethod
+    def verify_manifest(manifest: DerivativesAuditManifest) -> bool:
+        """Re-computes canonical SHA-256 digest and verifies audit manifest integrity."""
+        raw_dict = {
+            "dataset_version": manifest.dataset_version,
+            "manifest_id": manifest.manifest_id,
+            "model_version": manifest.model_version,
+            "pricing_results_summary": manifest.pricing_results_summary,
+            "span_margin_summary": manifest.span_margin_summary,
+            "timestamp": manifest.timestamp,
+        }
+
+        try:
+            canonical_dict = _canonicalize_value(raw_dict)
+            canonical_json = json.dumps(canonical_dict, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            expected_digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+            return expected_digest == manifest.manifest_hash_sha256
+        except Exception:
+            return False
