@@ -127,8 +127,11 @@ class DerivativesService:
     """Integrated Research & Risk Replay Interface for Derivatives Analytics."""
 
     def __init__(self, environment: str = "RESEARCH"):
-        if environment == "LIVE":
-            raise PermissionError("Derivatives Engine firewall explicitly blocks LIVE execution environment")
+        if environment is None:
+            raise PermissionError("Environment cannot be None")
+        env_upper = str(environment).upper()
+        if env_upper in ("LIVE", "LIVE_TRADING") or environment not in ("RESEARCH", "PAPER"):
+            raise PermissionError(f"Derivatives Engine firewall explicitly blocks environment '{environment}'")
         self.environment = environment
         self.contract_registry = DerivativesContractRegistry()
         self.expiry_monitor = ExpiryRiskMonitor()

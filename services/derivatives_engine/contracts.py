@@ -221,3 +221,97 @@ class DerivativesAuditManifest:
     pricing_results_summary: Dict[str, float]
     span_margin_summary: Dict[str, float]
     manifest_hash_sha256: str
+
+
+# Stage 13 Exceptions
+class GreeksHedgingLimitError(DerivativesError):
+    """Raised when required delta hedge quantity breaches maximum limit."""
+    pass
+
+
+class StrategyBacktestError(DerivativesError):
+    """Raised when strategy backtest execution fails or collateral is insufficient."""
+    pass
+
+
+class StrategyType(str, Enum):
+    BULL_CALL_SPREAD = "BULL_CALL_SPREAD"
+    BEAR_CALL_SPREAD = "BEAR_CALL_SPREAD"
+    BULL_PUT_SPREAD = "BULL_PUT_SPREAD"
+    BEAR_PUT_SPREAD = "BEAR_PUT_SPREAD"
+    STRADDLE = "STRADDLE"
+    STRANGLE = "STRANGLE"
+    IRON_CONDOR = "IRON_CONDOR"
+    BUTTERFLY = "BUTTERFLY"
+    COLLAR = "COLLAR"
+    SYNTHETIC_LONG = "SYNTHETIC_LONG"
+    CUSTOM = "CUSTOM"
+
+
+@dataclass(frozen=True)
+class OptionLeg:
+    contract: OptionContract
+    quantity: int  # Positive for Long, Negative for Short
+    entry_price: float
+
+    def __post_init__(self):
+        if self.quantity == 0:
+            raise DerivativesValidationError("Leg quantity cannot be zero")
+        if math.isnan(self.entry_price) or math.isinf(self.entry_price) or self.entry_price < 0.0:
+            raise DerivativesValidationError(f"Invalid leg entry_price: {self.entry_price}")
+
+
+@dataclass(frozen=True)
+class OptionStrategySpec:
+    name: str
+    strategy_type: StrategyType
+    legs: List[OptionLeg]
+    underlying_symbol: str
+    underlying_price: float
+
+    def __post_init__(self):
+        if not self.name or not self.underlying_symbol:
+            raise DerivativesValidationError("Strategy name and underlying_symbol must be non-empty")
+        if not self.legs:
+            raise DerivativesValidationError("Strategy must contain at least one leg")
+        if math.isnan(self.underlying_price) or math.isinf(self.underlying_price) or self.underlying_price <= 0.0:
+            raise DerivativesValidationError(f"Invalid underlying_price: {self.underlying_price}")
+
+
+@dataclass(frozen=True)
+class AdvisoryOptionStrategySnapshot:
+    strategy_name: str
+    strategy_type: str
+    net_pnl: float
+    net_delta: float
+    net_gamma: float
+    net_vega: float
+    net_theta: float
+    span_margin_required: float
+    timestamp_utc: str
+
+
+@dataclass(frozen=True)
+class StrategyBacktestResult:
+    strategy_name: str
+    realized_pnl: float
+    unrealized_pnl: float
+    total_pnl: float
+    net_premium_collected: float
+    total_transaction_fees: float
+    total_slippage: float
+    total_roll_costs: float
+    final_nov: float
+    span_margin_required: float
+    execution_status: str
+    hedge_history: List[Dict] = field(default_factory=list)
+    manifest_hash: str = ""
+
+
+@dataclass(frozen=True)
+class StressGridReport:
+    strategy_name: str
+    spot_shifts: List[float]
+    vol_shifts: List[float]
+    grid_pnls: List[List[float]]
+    max_stress_loss: float
