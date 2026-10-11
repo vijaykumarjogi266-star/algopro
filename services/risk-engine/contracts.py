@@ -24,6 +24,8 @@ class RiskRejectionCode(str, Enum):
     DATA_QUALITY_UNSATISFACTORY = "DATA_QUALITY_UNSATISFACTORY"
     PROHIBITED_INSTRUMENT = "PROHIBITED_INSTRUMENT"
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
+    CIRCUIT_BREAKER_TRIGGERED = "CIRCUIT_BREAKER_TRIGGERED"
+    DRAWDOWN_VELOCITY_BREACHED = "DRAWDOWN_VELOCITY_BREACHED"
 
 
 class HardRiskLimits(BaseModel):
@@ -35,6 +37,8 @@ class HardRiskLimits(BaseModel):
     max_open_positions: int = Field(default=10, ge=1, le=50)
     enforce_mandatory_stop_loss: bool = True
     max_leverage: float = Field(default=1.0, ge=1.0, le=1.0, description="Strictly 1.0x in initial foundation")
+    circuit_breaker_volatility_multiplier: float = Field(default=3.5, ge=1.5, le=10.0, description="Volatility threshold for emergency circuit breaker")
+    max_allowed_drawdown_velocity: float = Field(default=0.05, ge=0.005, le=0.20, description="Max allowed drawdown rate per hour")
 
 
 class RiskEvaluationResult(BaseModel):

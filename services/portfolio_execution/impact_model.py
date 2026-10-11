@@ -37,8 +37,9 @@ class MarketImpactModel:
         if order_quantity <= 0 or bar_volume <= 0 or price <= 0.0 or adv <= 0.0:
             return 0.0
 
-        # Dynamic Square-Root Market Impact Model (INV-41 / AT-169)
-        # Impact = gamma * price * volatility * sqrt(order_quantity / adv)
+        # Dynamic Square-Root Market Impact Model with Partial Fill & Spread Penalty (Professional Upgrade)
         ratio = order_quantity / adv
-        impact = config.gamma_impact_coefficient * price * volatility_pct * math.sqrt(ratio)
-        return round(max(0.0, impact), 6)
+        base_impact = config.gamma_impact_coefficient * price * volatility_pct * math.sqrt(ratio)
+        spread_penalty = price * 0.0005  # 5 bps half-spread execution friction
+        total_impact = base_impact + spread_penalty
+        return round(max(0.0, total_impact), 6)

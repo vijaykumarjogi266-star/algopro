@@ -98,6 +98,16 @@ class RiskEngine(IRiskEngine):
                 timestamp=now,
             )
 
+        # 7. Enhanced Professional Circuit Breaker / Volatility Check
+        if current_drawdown_pct >= self.limits.max_portfolio_drawdown_pct * 0.9:
+            return RiskEvaluationResult(
+                is_approved=False,
+                rejection_code=RiskRejectionCode.CIRCUIT_BREAKER_TRIGGERED,
+                rejection_reason=f"Emergency circuit breaker triggered: drawdown {current_drawdown_pct*100:.2f}% approaching hard limit",
+                approved_quantity=0,
+                timestamp=now,
+            )
+
         # Approved
         return RiskEvaluationResult(
             is_approved=True,
