@@ -198,6 +198,13 @@ def main():
         log_msg(f"--- Cycle #{cycle}: Scanning Market ---")
         market_prices = {}
 
+        # Indian Market Microstructure Guard: Mandatory 15:15 IST Intraday Auto-Square-Off
+        now_utc = datetime.now(timezone.utc)
+        ist_minutes_total = (now_utc.hour * 60 + now_utc.minute) + 330  # UTC to IST (+5:30)
+        ist_hour = (ist_minutes_total // 60) % 24
+        ist_minute = ist_minutes_total % 60
+        is_past_1515_ist = (ist_hour > 15) or (ist_hour == 15 and ist_minute >= 15)
+
         for sym in UNIVERSE:
             data = scan_symbol(sym)
             if data["status"] != "OK":
@@ -207,9 +214,22 @@ def main():
             market_prices[sym] = price
             sym_key = sym.upper()
 
-            # 1. Manage Active Positions (Check SL & Target Exits)
+            # 1. Manage Active Positions (Check 15:15 IST Square-off, SL & Target Exits)
             current_pos = session.portfolio.positions.get(sym_key)
             if current_pos and current_pos.quantity > 0:
+                if is_past_1515_ist:
+                    log_msg(f"[15:15 IST AUTO-SQUARE-OFF] Mandatory intraday square-off triggered for {sym} @ {price:.2f}")
+                    order, fill = paper_engine.submit_manual_order(
+                        session_id=session.session_id,
+                        symbol=sym,
+                        side=OrderSide.SELL,
+                        quantity=current_pos.quantity,
+                        price=price,
+                    )
+                    trade_stops.pop(sym_key, None)
+                    trade_targets.pop(sym_key, None)
+                    continue
+
                 current_sl = trade_stops.get(sym_key, current_pos.average_entry_price * 0.98)
                 current_tp = trade_targets.get(sym_key, current_pos.average_entry_price * 1.03)
 
@@ -237,8 +257,12 @@ def main():
                     trade_targets.pop(sym_key, None)
                 continue
 
-            # 2. Check New Entry Signals
+            # 2. Check New Entry Signals (Blocked after 15:15 IST)
             if data["signal"] == "BUY":
+                if is_past_1515_ist:
+                    log_msg(f"[SIGNAL BLOCKED] {sym}: Past 15:15 IST intraday cutoff. Entries prohibited.")
+                    continue
+
                 if len(session.portfolio.positions) >= risk_limits.max_open_positions:
                     log_msg(f"[SIGNAL IGNORED] {sym}: Max open positions ({risk_limits.max_open_positions}) reached.")
                     continue

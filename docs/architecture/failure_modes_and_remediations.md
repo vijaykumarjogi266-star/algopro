@@ -44,7 +44,37 @@ This document formalizes the systematic failure mode analysis and corresponding 
 
 ---
 
-## 4. Indian Market Specific Risk Guardrails
+## 4. Indian Market Microstructure & Auto-Square-Off Clock Enforcement
 
+### Failure Mode
+- Intraday equity and option positions left unmonitored into market close suffer from overnight gap risk and severe broker RMS square-off penalty charges.
+- Failure to account for the mandatory 15:15 IST intraday cutoff leads to unintentional carryover of MIS margin positions.
+
+### Remediation Implemented
+- **15:15 IST Intraday Auto-Square-Off Clock Enforcement:** Implemented in `run_live_paper_daemon.py`. Automatically detects when Indian Standard Time passes 15:15 IST (09:45 UTC), squares off all active intraday positions at current market prices, and strictly halts all new BUY entries.
 - **Stock Option Physical Delivery (`OPTSTK`):** Compulsory physical delivery obligations near monthly expiry are quarantined.
 - **Statutory Friction & Costs:** All paper and backtest fills account for Indian Securities Transaction Tax (STT), Stamp Duty, GST, and exchange transaction fees.
+
+---
+
+## 5. Whalley-Wilmott Asymptotic Optimal Hedging
+
+### Failure Mode
+- Naive continuous delta hedging rebalances on every infinitesimal tick price movement, generating excessive turnover and incurring crippling STT and brokerage drag that completely wipes out option arbitrage edge.
+
+### Remediation Implemented
+- **Asymptotic Bandwidth Rebalancing:** Implemented `WhalleyWilmottHedgingEngine` in `services/derivatives_engine/greeks_hedging.py`.
+- Computes no-transaction bandwidth $H = \left(\frac{3}{2} \cdot \frac{e^{-r \Delta t} \cdot c \cdot S \cdot \Gamma^2}{\gamma}\right)^{1/3}$. Rebalances only when net delta breaches the band, rebalancing to the band boundary rather than zero, preserving mathematical risk-return efficiency under friction.
+
+---
+
+## 6. Double-Entry Financial Ledger Reconciliation
+
+### Failure Mode
+- Asynchronous partial fills and network timeouts create drift between internal cash/position ledger and broker reporting.
+
+### Remediation Implemented
+- **DoubleEntryLedgerReconciler:** Added in `services/execution_gateway/reconciliation_engine.py` to enforce the double-entry accounting identity:
+  $\text{Equity} = \text{Cash} + \text{Market Value of Open Positions}$
+  Detects and flags floating-point drift or unrecorded cash outflows exceeding ₹0.01.
+

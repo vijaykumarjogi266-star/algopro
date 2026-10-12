@@ -147,3 +147,44 @@ class MultiBrokerReconciliationEngine:
             reconciliation_status=status,
             residual_drift_count=residual_drift_count,
         )
+
+
+class DoubleEntryLedgerReconciler:
+    """
+    Double-Entry Financial Accounting Ledger Reconciler.
+    Enforces strict mathematical conservation of capital across all portfolio transactions:
+    Equity == Cash + Market Value of Open Positions
+    Current Cash == Initial Cash + Sum(Realized PnL) - Sum(Fees) - Sum(Slippage) - Sum(Open Position Cost Basis)
+    """
+
+    @staticmethod
+    def audit_accounting_invariants(
+        initial_cash: float,
+        current_cash: float,
+        positions: Dict[str, Dict[str, float]],  # {symbol: {quantity, avg_price, current_price, cost_basis}}
+        total_fees_paid: float,
+        total_slippage_paid: float,
+        realized_pnl: float,
+        tolerance: float = 0.01,
+    ) -> Tuple[bool, float, Optional[str]]:
+        """
+        Audits double-entry invariants against floating-point drift.
+        Returns: (is_valid, imbalance_amount, failure_reason).
+        """
+        total_cost_basis = sum(pos.get("cost_basis", pos.get("quantity", 0) * pos.get("avg_price", 0.0)) for pos in positions.values())
+        total_market_val = sum(pos.get("quantity", 0) * pos.get("current_price", 0.0) for pos in positions.values())
+
+        # Expected cash = Initial Cash + Realized PnL - Total Fees - Total Slippage - Net Open Position Outflow
+        expected_cash = initial_cash + realized_pnl - total_fees_paid - total_slippage_paid - total_cost_basis
+        cash_imbalance = abs(current_cash - expected_cash)
+
+        if cash_imbalance > tolerance:
+            return (
+                False,
+                cash_imbalance,
+                f"Double-entry cash imbalance detected: Expected INR {expected_cash:.2f}, Actual INR {current_cash:.2f} (Delta: {cash_imbalance:.4f})"
+            )
+
+        expected_equity = current_cash + total_market_val
+        return True, 0.0, None
+

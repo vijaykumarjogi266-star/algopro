@@ -96,3 +96,87 @@ class GreeksHedgingEngine:
             return True, "; ".join(alerts)
 
         return False, None
+
+
+class WhalleyWilmottHedgingEngine:
+    """
+    Whalley-Wilmott (1997) Asymptotic Optimal Option Hedging Engine.
+    
+    Computes cost-optimal no-transaction hedging bandwidth around Black-Scholes Delta,
+    balancing gamma risk variance against proportional transaction costs (STT, brokerage, slippage).
+    
+    Bandwidth H = ( (3/2) * exp(-r * dt) * c * S * Gamma^2 / gamma_risk )^(1/3)
+    """
+
+    @staticmethod
+    def calculate_asymptotic_bandwidth(
+        spot_price: float,
+        net_gamma: float,
+        cost_rate: float = 0.001,  # 10 bps statutory + exchange friction
+        risk_aversion: float = 0.01,
+        discount_factor: float = 1.0,
+    ) -> float:
+        """
+        Calculates the half-width of the no-transaction zone around target Delta.
+        """
+        if spot_price <= 0.0 or cost_rate <= 0.0 or risk_aversion <= 0.0:
+            return 0.0
+
+        abs_gamma = abs(net_gamma)
+        if abs_gamma < 1e-9:
+            return 0.0
+
+        # Whalley-Wilmott asymptotic formula
+        numerator = 1.5 * discount_factor * cost_rate * spot_price * (abs_gamma ** 2)
+        inner = numerator / risk_aversion
+        return float(inner ** (1.0 / 3.0))
+
+    @classmethod
+    def calculate_optimal_hedge(
+        cls,
+        net_delta: float,
+        target_delta: float,
+        spot_price: float,
+        net_gamma: float,
+        cost_rate: float = 0.001,
+        risk_aversion: float = 0.01,
+        multiplier: float = 1.0,
+        lot_size: int = 1,
+        max_hedge_limit: int = 1000,
+    ) -> Tuple[int, float, bool]:
+        """
+        Calculates optimal hedge contracts under Whalley-Wilmott bounds.
+        Returns: (hedge_contracts, bandwidth, is_rebalanced).
+        
+        Only triggers rebalancing when |net_delta - target_delta| > bandwidth.
+        Rebalances to the band edge rather than zero to minimize transaction fees.
+        """
+        bandwidth = cls.calculate_asymptotic_bandwidth(
+            spot_price=spot_price,
+            net_gamma=net_gamma,
+            cost_rate=cost_rate,
+            risk_aversion=risk_aversion,
+        )
+
+        delta_diff = net_delta - target_delta
+
+        # Inside no-transaction zone -> Do not trade (save friction)
+        if abs(delta_diff) <= bandwidth:
+            return 0, bandwidth, False
+
+        # Outside no-transaction zone -> Rebalance towards the band boundary
+        if delta_diff > bandwidth:
+            excess_delta = delta_diff - bandwidth
+        else:
+            excess_delta = delta_diff + bandwidth
+
+        raw_hedge = -excess_delta * multiplier / float(lot_size)
+        hedge_qty = round_half_towards_zero(raw_hedge)
+
+        if abs(hedge_qty) > max_hedge_limit:
+            raise GreeksHedgingLimitError(
+                f"Whalley-Wilmott hedge {hedge_qty} exceeds safety limit {max_hedge_limit} (excess_delta: {excess_delta:.4f})"
+            )
+
+        return hedge_qty, bandwidth, True
+
