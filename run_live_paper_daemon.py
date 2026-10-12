@@ -175,7 +175,7 @@ def main():
     session = None
     for s in sessions:
         if s.status == SessionStatus.RUNNING:
-            session = s
+            session = paper_engine.get_session(s.session_id)
             break
 
     if not session:
@@ -199,23 +199,92 @@ def main():
     cycle = 0
     trade_targets = {}  # {symbol: target_price}
     trade_stops = {}    # {symbol: stop_loss}
+    market_prices = {}
 
     while running:
         cycle += 1
-        log_msg(f"--- Cycle #{cycle}: Scanning Market ---")
-        market_prices = {}
-
-        # Autonomous Sentinel Daily Drawdown Killswitch
-        if sentinel.check_daily_drawdown_killswitch(session.portfolio.total_equity):
-            log_msg("[CIRCUIT BREAKER ACTIVE] Daily drawdown limit (-2.5%) breached. All new entries frozen.")
-
-        # Indian Market Microstructure Guard: Mandatory 15:15 IST Intraday Auto-Square-Off
         now_utc = datetime.now(timezone.utc)
         ist_minutes_total = (now_utc.hour * 60 + now_utc.minute) + 330  # UTC to IST (+5:30)
         ist_hour = (ist_minutes_total // 60) % 24
         ist_minute = ist_minutes_total % 60
         is_past_1515_ist = (ist_hour > 15) or (ist_hour == 15 and ist_minute >= 15)
+        is_market_day = sentinel.is_market_day()
+        is_market_open = is_market_day and (
+            (ist_hour == 9 and ist_minute >= 15) or (10 <= ist_hour < 15) or (ist_hour == 15 and ist_minute < 15)
+        )
 
+        # Autonomous Sentinel Daily Drawdown Killswitch
+        if sentinel.check_daily_drawdown_killswitch(session.portfolio.total_equity):
+            log_msg("[CIRCUIT BREAKER ACTIVE] Daily drawdown limit (-2.5%) breached. All new entries frozen.")
+
+        # --- 1. Scheduled Chronological Automation ---
+        # 08:30 IST Pre-Market System Readiness & Strategy Allocation Ingestion
+        if ist_hour == 8 and 30 <= ist_minute <= 35:
+            if not getattr(sentinel, "_premarket_executed_today", False):
+                sentinel.execute_pre_market_maintenance()
+                sentinel._premarket_executed_today = True
+        elif ist_hour != 8:
+            sentinel._premarket_executed_today = False
+
+        # 15:35 IST Post-Market EOD Double-Entry Audit & Tearsheet
+        if ist_hour == 15 and 35 <= ist_minute < 40:
+            if not getattr(sentinel, "_eod_dispatched_today", False):
+                sentinel.execute_eod_reconciliation_and_tearsheet(
+                    session.portfolio.total_equity,
+                    len(session.portfolio.positions),
+                )
+                sentinel._eod_dispatched_today = True
+        elif ist_hour != 15:
+            sentinel._eod_dispatched_today = False
+
+        # 15:40 IST Autonomous Quantitative Research & Strategy Allocation Bot
+        if ist_hour == 15 and 40 <= ist_minute <= 50:
+            if not getattr(sentinel, "_research_executed_today", False):
+                log_msg("[AUTONOMOUS RESEARCH] Triggering EOD backtesting & strategy allocation bot...")
+                manifest = sentinel.execute_eod_research_and_strategy_allocation()
+                selected = manifest.get("selected_strategy", "WAIT")
+                log_msg(f"[AUTONOMOUS RESEARCH] Completed. Strategy allocated for next session: {selected}")
+                sentinel._research_executed_today = True
+        elif ist_hour != 15:
+            sentinel._research_executed_today = False
+
+        # 16:00 IST SQLite WAL Maintenance & VACUUM
+        if ist_hour == 16 and 0 <= ist_minute <= 5:
+            if not getattr(sentinel, "_vacuum_executed_today", False):
+                sentinel.vacuum_database()
+                sentinel._vacuum_executed_today = True
+        elif ist_hour != 16:
+            sentinel._vacuum_executed_today = False
+
+        # --- 2. Microstructure Cutoff: Square off any active positions past 15:15 IST ---
+        if is_past_1515_ist and len(session.portfolio.positions) > 0:
+            for sym_key, pos in list(session.portfolio.positions.items()):
+                log_msg(f"[15:15 IST AUTO-SQUARE-OFF] Mandatory intraday square-off for {sym_key} @ {pos.current_price:.2f}")
+                order, fill = paper_engine.submit_manual_order(
+                    session_id=session.session_id,
+                    symbol=sym_key,
+                    side=OrderSide.SELL,
+                    quantity=pos.quantity,
+                    price=pos.current_price,
+                )
+                session = paper_engine.get_session(session.session_id)
+                trade_stops.pop(sym_key, None)
+                trade_targets.pop(sym_key, None)
+
+        # --- 3. Standby Mode Outside Market Hours ---
+        if not is_market_open:
+            if cycle % 10 == 1:
+                status_str = "NSE market closed" if is_market_day else "Weekend / NSE holiday"
+                log_msg(f"[STANDBY] {status_str} (IST {ist_hour:02d}:{ist_minute:02d}). Next session opens 09:15 IST. Cash: INR {session.portfolio.cash:,.2f} | Equity: INR {session.portfolio.total_equity:,.2f}")
+            for _ in range(SCAN_INTERVAL_SECONDS):
+                if not running:
+                    break
+                time.sleep(1)
+            continue
+
+        # --- 4. Active Market Trading Session (09:15 - 15:15 IST) ---
+        log_msg(f"--- Cycle #{cycle}: Active Market Scan (IST {ist_hour:02d}:{ist_minute:02d}) ---")
+        market_prices = {}
         for sym in UNIVERSE:
             data = scan_symbol(sym)
             if data["status"] != "OK":
@@ -225,22 +294,9 @@ def main():
             market_prices[sym] = price
             sym_key = sym.upper()
 
-            # 1. Manage Active Positions (Check 15:15 IST Square-off, SL & Target Exits)
+            # Manage active positions (SL / TP)
             current_pos = session.portfolio.positions.get(sym_key)
             if current_pos and current_pos.quantity > 0:
-                if is_past_1515_ist:
-                    log_msg(f"[15:15 IST AUTO-SQUARE-OFF] Mandatory intraday square-off triggered for {sym} @ {price:.2f}")
-                    order, fill = paper_engine.submit_manual_order(
-                        session_id=session.session_id,
-                        symbol=sym,
-                        side=OrderSide.SELL,
-                        quantity=current_pos.quantity,
-                        price=price,
-                    )
-                    trade_stops.pop(sym_key, None)
-                    trade_targets.pop(sym_key, None)
-                    continue
-
                 current_sl = trade_stops.get(sym_key, current_pos.average_entry_price * 0.98)
                 current_tp = trade_targets.get(sym_key, current_pos.average_entry_price * 1.03)
 
@@ -253,6 +309,7 @@ def main():
                         quantity=current_pos.quantity,
                         price=current_sl,
                     )
+                    session = paper_engine.get_session(session.session_id)
                     trade_stops.pop(sym_key, None)
                     trade_targets.pop(sym_key, None)
                 elif data["high"] >= current_tp:
@@ -264,11 +321,12 @@ def main():
                         quantity=current_pos.quantity,
                         price=current_tp,
                     )
+                    session = paper_engine.get_session(session.session_id)
                     trade_stops.pop(sym_key, None)
                     trade_targets.pop(sym_key, None)
                 continue
 
-            # 2. Check New Entry Signals (Blocked after 15:15 IST or on Drawdown Killswitch)
+            # Check new entry signals
             if data["signal"] == "BUY":
                 if sentinel.is_killswitch_tripped:
                     log_msg(f"[SIGNAL BLOCKED] {sym}: Daily drawdown killswitch is active. Entries frozen.")
@@ -309,6 +367,7 @@ def main():
                         price=price,
                         stop_loss=data["stop_loss"],
                     )
+                    session = paper_engine.get_session(session.session_id)
                     if fill:
                         trade_stops[sym_key] = data["stop_loss"]
                         trade_targets[sym_key] = data["target"]
@@ -325,28 +384,6 @@ def main():
         # Mark-to-market portfolio valuation
         session.portfolio.mark_to_market(market_prices)
 
-        # 15:35 IST Post-Market EOD Report (Once per day)
-        if ist_hour == 15 and 35 <= ist_minute < 40:
-            if not getattr(sentinel, "_eod_dispatched_today", False):
-                sentinel.execute_eod_reconciliation_and_tearsheet(
-                    session.portfolio.total_equity,
-                    len(session.portfolio.positions),
-                )
-                sentinel._eod_dispatched_today = True
-        elif ist_hour != 15:
-            sentinel._eod_dispatched_today = False
-
-        # 15:40 IST Autonomous Quantitative Research & Strategy Allocation (Once per day)
-        if ist_hour == 15 and 40 <= ist_minute <= 50:
-            if not getattr(sentinel, "_research_executed_today", False):
-                log_msg("[AUTONOMOUS RESEARCH] Triggering EOD backtesting & strategy allocation bot...")
-                manifest = sentinel.execute_eod_research_and_strategy_allocation()
-                selected = manifest.get("selected_strategy", "WAIT")
-                log_msg(f"[AUTONOMOUS RESEARCH] Completed. Strategy allocated for next session: {selected}")
-                sentinel._research_executed_today = True
-        elif ist_hour != 15:
-            sentinel._research_executed_today = False
-
         pos_val = session.portfolio.market_value_of_positions
         margin_used = pos_val / LEVERAGE
         free_margin = max(0.0, INITIAL_CAPITAL - margin_used)
@@ -359,7 +396,8 @@ def main():
             time.sleep(1)
 
     log_msg(f"[SHUTDOWN] Paper trading daemon exiting gracefully. Final Equity: INR {session.portfolio.total_equity:,.2f}")
-    session.portfolio.mark_to_market(market_prices)
+    if market_prices:
+        session.portfolio.mark_to_market(market_prices)
     paper_engine._persist_session(session)
     log_msg("[SHUTDOWN] Portfolio state successfully persisted to database.")
 
