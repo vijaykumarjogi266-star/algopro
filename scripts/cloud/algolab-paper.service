@@ -1,0 +1,27 @@
+[Unit]
+Description=Algo Lab Quantitative Paper & Forward Trading Daemon
+After=network.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/algopro
+Environment=PYTHONUNBUFFERED=1
+Environment=ENVIRONMENT=production
+ExecStart=/usr/bin/python3 run_live_paper_daemon.py
+Restart=always
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+StandardOutput=append:/home/ubuntu/algopro/data/paper_trading_live.log
+StandardError=append:/home/ubuntu/algopro/data/paper_trading_live.log
+
+# Resource & Sandboxing Guardrails
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=4G
+TasksMax=1024
+
+[Install]
+WantedBy=multi-user.target
