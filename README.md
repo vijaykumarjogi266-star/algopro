@@ -144,18 +144,115 @@ pytest tests/ -v
 
 ---
 
-## Current Status: Stage 1 Foundation Complete
+### 5. Run Test Suite & Institutional Dry Run
+```bash
+# Run unit & contract test suite
+pytest tests/ -v
 
-Stage 1 establishes the rock-solid architectural core, formal contracts, and safety barriers.
-- [x] Directory structure with clear domain boundaries
-- [x] FastAPI application with structured JSON logging and health probes
-- [x] Next.js TypeScript web shell with clean quant design
-- [x] Docker Compose with PostgreSQL 16
-- [x] Pydantic settings with immutable safety validator (prohibits live trading)
-- [x] Initial database models for experiments, decision audit (WAIT/REJECT), and trades
-- [x] Core contracts for OHLCV, Data Quality Validator, Indicators, Strategy, Risk, Backtest, and Paper Broker
-- [x] Full unit and contract test suite (14 passing tests)
-- [x] GitHub Actions CI workflow
-- [x] Architecture documentation
+# Run 6-module institutional safety & integration verification
+python3 test_dry_run_institutional.py
+```
 
-**Next Step**: Stage 2 (Data & Data Quality Engine).
+---
+
+## Oracle Cloud Infrastructure (OCI) Deployment & Operations
+
+Algo Lab is designed for **30-day unsupervised forward paper testing on Oracle Cloud Infrastructure (OCI)** with **zero human intervention**.
+
+### 1. One-Line Setup on OCI Ubuntu Server
+```bash
+# 1. Clone repository
+git clone https://github.com/vijaykumarjogi266-star/algopro.git /home/ubuntu/algopro
+cd /home/ubuntu/algopro
+
+# 2. Run automated server setup (packages, firewall, systemd registration)
+bash scripts/cloud/setup_vps.sh
+
+# 3. Create virtual environment and install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install yfinance pyotp
+
+# 4. Configure environment
+cp .env.example .env
+nano .env
+```
+
+### 2. Operating the 24/7 Systemd Background Daemon
+```bash
+# Start paper trading daemon
+sudo systemctl start algolab-paper
+
+# Check service status & uptime
+sudo systemctl status algolab-paper
+
+# Stream live real-time trading logs
+tail -f data/paper_trading_live.log
+
+# Graceful stop (liquidates open positions and writes SQLite WAL checkpoint)
+sudo systemctl stop algolab-paper
+
+# Restart after pulling latest updates
+git pull origin main
+sudo systemctl restart algolab-paper
+```
+
+---
+
+## Autonomous Zero-Human-Intervention Daily Schedule (IST)
+
+The platform runs on a fully automated, clock-synchronized daily schedule adhering strictly to **Principle 1 (Never force a trade)** and **Principle 2 (WAIT is a valid decision)**:
+
+```
+[08:30 IST] Pre-Market Sentinel
+       │  • Loads yesterday's strategy decision manifest from data/decisions/
+       │  • Runs DB backup to data/backups/ & system health probe
+       │  • Dispatches pre-market readiness webhook
+       ▼
+[09:15 - 15:15 IST] Live Autonomous Paper Engine
+       │  • Scans NSE market every 60 seconds
+       │  • Enforces 5x buying power, ATR stop-loss, and target profit
+       │  • Trips -2.5% daily drawdown killswitch if breached (freezes entries)
+       ▼
+[15:15 IST] Mandatory Intraday Square-Off Cutoff
+       │  • Auto-squares off all open intraday positions at market
+       │  • Strictly prohibits new entries after 15:15 IST
+       ▼
+[15:35 IST] Post-Market Double-Entry Reconciliation & Tearsheet
+       │  • Audits Cash + Cost Basis + Realized PnL + Fees + Slippage == Initial Equity
+       │  • Dispatches EOD performance report via multi-channel webhooks
+       ▼
+[15:40 IST] Autonomous Quantitative Research Bot (EOD Cycle)
+       │  • Classifies market regime (Bull, Bear, High-Vol Chop, Mean-Reverting Range)
+       │  • Backtests 4 candidate strategies over rolling 60-day window
+       │  • Discounts backtests using Deflated Sharpe Ratio (DSR, Bailey & López de Prado)
+       │  • Enforces Robustness Gates (DSR ≥ 0.50, Profit Factor ≥ 1.10, Drawdown ≤ 12%)
+       │  • Emits WAIT (0.0x risk) if no candidate passes gate
+       │  • Writes decision manifest to data/decisions/decision_YYYYMMDD.json
+       ▼
+[16:00 IST] Database Maintenance
+       │  • Executes SQLite WAL checkpoint and VACUUM
+       ▼
+[Standby Sleep] Off-Market Standby Mode
+          • Engine sleeps cleanly with zero API spam until tomorrow 08:30 IST
+```
+
+---
+
+## Institutional Safety & Fault-Tolerance Controls
+
+1. **Network Connectivity Guard (`NetworkConnectivityGuard`)**: Low-latency WAN socket monitor. If connection drops, freezes all trade proposals, buffers alerts, and executes automatic 15:15 IST square-off upon recovery.
+2. **Double-Entry Ledger Reconciler**: Mathematical proof of zero cash leakage across order fills, brokerage fees, and slippage.
+3. **Whalley-Wilmott Asymptotic Hedging**: Non-linear no-trade bandwidth $H$ eliminating transaction churn during delta/gamma hedging.
+4. **Static AST Isolation Scanner**: Pre-execution AST firewall intercepting unauthorized network sockets, subprocess spawns, or hardcoded secrets.
+5. **Zerodha Kite Rate Limiter**: 3 req/sec sliding window rate limiter complying with broker API terms.
+
+---
+
+## Documentation Index
+
+- [Oracle Cloud Infrastructure (OCI) Deployment Guide](docs/deployment/oracle_cloud_deployment.md)
+- [Autonomous Zero-Intervention Engine Architecture](docs/architecture/autonomous_zero_intervention_engine.md)
+- [Autonomous Quantitative Research & Decision Bot Specification](docs/architecture/autonomous_research_and_decision_bot.md)
+- [Failure Modes, Root Causes & Institutional Remediations](docs/architecture/failure_modes_and_remediations.md)
