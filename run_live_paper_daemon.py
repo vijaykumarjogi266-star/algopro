@@ -41,6 +41,7 @@ from services.risk_engine.contracts import HardRiskLimits
 from services.risk_engine.audit import ContinuousRiskAuditor
 from services.risk_engine.hooks import ValueAtRiskFilter
 from services.paper_engine.session import PaperTradingEngine, SessionStatus
+from services.paper_engine.autonomous_orchestrator import AutonomousSentinel
 from services.backtest_engine.contracts import OrderSide, OrderType
 from services.backtest_engine.execution_lifecycle import ExecutionLifecycleManager
 
@@ -189,6 +190,12 @@ def main():
     else:
         log_msg(f"Resumed active paper session ID: {session.session_id}")
 
+    sentinel = AutonomousSentinel(
+        db_path=DB_PATH,
+        max_daily_drawdown_pct=0.025,
+        initial_capital=BUYING_POWER,
+    )
+
     cycle = 0
     trade_targets = {}  # {symbol: target_price}
     trade_stops = {}    # {symbol: stop_loss}
@@ -197,6 +204,10 @@ def main():
         cycle += 1
         log_msg(f"--- Cycle #{cycle}: Scanning Market ---")
         market_prices = {}
+
+        # Autonomous Sentinel Daily Drawdown Killswitch
+        if sentinel.check_daily_drawdown_killswitch(session.portfolio.total_equity):
+            log_msg("[CIRCUIT BREAKER ACTIVE] Daily drawdown limit (-2.5%) breached. All new entries frozen.")
 
         # Indian Market Microstructure Guard: Mandatory 15:15 IST Intraday Auto-Square-Off
         now_utc = datetime.now(timezone.utc)
@@ -257,8 +268,12 @@ def main():
                     trade_targets.pop(sym_key, None)
                 continue
 
-            # 2. Check New Entry Signals (Blocked after 15:15 IST)
+            # 2. Check New Entry Signals (Blocked after 15:15 IST or on Drawdown Killswitch)
             if data["signal"] == "BUY":
+                if sentinel.is_killswitch_tripped:
+                    log_msg(f"[SIGNAL BLOCKED] {sym}: Daily drawdown killswitch is active. Entries frozen.")
+                    continue
+
                 if is_past_1515_ist:
                     log_msg(f"[SIGNAL BLOCKED] {sym}: Past 15:15 IST intraday cutoff. Entries prohibited.")
                     continue
@@ -298,11 +313,28 @@ def main():
                         trade_stops[sym_key] = data["stop_loss"]
                         trade_targets[sym_key] = data["target"]
                         log_msg(f"[BUY EXECUTED] {shares} shs {sym} @ {fill.fill_price:.2f} | SL: {data['stop_loss']} | Target: {data['target']}")
+                        sentinel.dispatcher.notify(
+                            title="Paper Order Executed",
+                            message=f"BUY {shares} shs of {sym} @ {fill.fill_price:.2f}",
+                            level="INFO",
+                            fields={"Symbol": sym, "Qty": str(shares), "Price": f"INR {fill.fill_price:.2f}", "SL": str(data["stop_loss"]), "TP": str(data["target"])}
+                        )
                 else:
                     log_msg(f"[RISK REJECTED] {sym}: {eval_res.rejection_reason}")
 
         # Mark-to-market portfolio valuation
         session.portfolio.mark_to_market(market_prices)
+
+        # 15:35 IST Post-Market EOD Report (Once per day)
+        if ist_hour == 15 and 35 <= ist_minute <= 40:
+            if not getattr(sentinel, "_eod_dispatched_today", False):
+                sentinel.execute_eod_reconciliation_and_tearsheet(
+                    session.portfolio.total_equity,
+                    len(session.portfolio.positions),
+                )
+                sentinel._eod_dispatched_today = True
+        elif ist_hour != 15:
+            sentinel._eod_dispatched_today = False
 
         pos_val = session.portfolio.market_value_of_positions
         margin_used = pos_val / LEVERAGE
