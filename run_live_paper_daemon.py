@@ -42,6 +42,7 @@ from services.risk_engine.audit import ContinuousRiskAuditor
 from services.risk_engine.hooks import ValueAtRiskFilter
 from services.paper_engine.session import PaperTradingEngine, SessionStatus
 from services.paper_engine.autonomous_orchestrator import AutonomousSentinel
+from services.observability.network_guard import NetworkConnectivityGuard
 from services.backtest_engine.contracts import OrderSide, OrderType
 from services.backtest_engine.execution_lifecycle import ExecutionLifecycleManager
 
@@ -200,9 +201,33 @@ def main():
     trade_targets = {}  # {symbol: target_price}
     trade_stops = {}    # {symbol: stop_loss}
     market_prices = {}
+    net_guard = NetworkConnectivityGuard()
 
     while running:
         cycle += 1
+
+        # Network Connectivity Guard & WAN Health Probe
+        is_online, net_changed, outage_dur = net_guard.probe()
+        if net_changed and not is_online:
+            log_msg("[NETWORK ALERT] WAN connection lost. Freezing trade proposal and entering defensive standby.")
+        elif net_changed and is_online:
+            log_msg(f"[NETWORK RECOVERED] WAN connectivity restored after {outage_dur:.1f}s. Reconnecting...")
+            sentinel.dispatcher.notify(
+                title="Network Restored",
+                message=f"Algo Lab restored connectivity after {outage_dur:.1f}s outage.",
+                level="INFO",
+                fields={"Outage Duration": f"{outage_dur:.1f}s", "Equity": f"INR {session.portfolio.total_equity:,.2f}"}
+            )
+
+        if not is_online:
+            if cycle % 5 == 1:
+                log_msg(f"[OFFLINE DEFENSE] Internet unavailable. In-flight trades frozen. Retrying in {SCAN_INTERVAL_SECONDS}s...")
+            for _ in range(SCAN_INTERVAL_SECONDS):
+                if not running:
+                    break
+                time.sleep(1)
+            continue
+
         now_utc = datetime.now(timezone.utc)
         ist_minutes_total = (now_utc.hour * 60 + now_utc.minute) + 330  # UTC to IST (+5:30)
         ist_hour = (ist_minutes_total // 60) % 24
