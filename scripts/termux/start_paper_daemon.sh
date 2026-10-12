@@ -7,6 +7,13 @@ if pgrep -f run_live_paper_daemon.py > /dev/null; then
     exit 0
 fi
 
+# Acquire Termux wake lock if available to prevent Android LMK / CPU deep sleep
+if command -v termux-wake-lock >/dev/null 2>&1; then
+    termux-wake-lock
+    echo "Termux wake-lock acquired (CPU will stay active during execution)."
+fi
+
 nohup python3 run_live_paper_daemon.py >> data/paper_trading_live.log 2>&1 &
 PID=$!
 echo "Live Paper Trading Daemon successfully started in background with PID: $PID"
+

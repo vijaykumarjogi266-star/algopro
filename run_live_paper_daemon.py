@@ -12,11 +12,22 @@ Runs a persistent real-time loop:
 import sys
 import os
 import time
+import signal
 from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
+running = True
+
+def handle_shutdown(signum, frame):
+    global running
+    print(f"\n[DAEMON] Received signal {signum}. Initiating graceful state persistence and shutdown...", flush=True)
+    running = False
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
 
 try:
     import yfinance as yf
@@ -182,7 +193,7 @@ def main():
     trade_targets = {}  # {symbol: target_price}
     trade_stops = {}    # {symbol: stop_loss}
 
-    while True:
+    while running:
         cycle += 1
         log_msg(f"--- Cycle #{cycle}: Scanning Market ---")
         market_prices = {}
@@ -275,7 +286,15 @@ def main():
 
         log_msg(f"Portfolio Status: Equity=INR {session.portfolio.total_equity:,.2f} | Margin Used=INR {margin_used:,.2f} ({(margin_used/INITIAL_CAPITAL)*100:.1f}%) | Free Margin=INR {free_margin:,.2f} | Unrealized PnL=INR {session.portfolio.total_unrealized_pnl:+,.2f} | Open Positions={len(session.portfolio.positions)}")
 
-        time.sleep(SCAN_INTERVAL_SECONDS)
+        for _ in range(SCAN_INTERVAL_SECONDS):
+            if not running:
+                break
+            time.sleep(1)
+
+    log_msg(f"[SHUTDOWN] Paper trading daemon exiting gracefully. Final Equity: INR {session.portfolio.total_equity:,.2f}")
+    session.portfolio.mark_to_market(market_prices)
+    paper_engine._persist_session(session)
+    log_msg("[SHUTDOWN] Portfolio state successfully persisted to database.")
 
 
 if __name__ == "__main__":

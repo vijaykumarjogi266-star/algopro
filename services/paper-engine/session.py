@@ -241,14 +241,27 @@ class PaperTradingEngine:
     def _get_connection(self) -> sqlite3.Connection:
         if self._persistent_conn is not None:
             return self._persistent_conn
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        if self.db_path != ":memory:":
+            try:
+                conn.execute("PRAGMA journal_mode = WAL")
+                conn.execute("PRAGMA synchronous = NORMAL")
+            except Exception:
+                pass
+        conn.execute("PRAGMA busy_timeout = 10000")
         return conn
 
     def _init_db(self):
         with self._lock:
             conn = self._get_connection()
+            if self.db_path != ":memory:":
+                try:
+                    conn.execute("PRAGMA journal_mode = WAL")
+                    conn.execute("PRAGMA synchronous = NORMAL")
+                except Exception:
+                    pass
             with conn:
                 conn.execute("""
                 CREATE TABLE IF NOT EXISTS paper_sessions (
