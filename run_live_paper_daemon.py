@@ -326,7 +326,7 @@ def main():
         session.portfolio.mark_to_market(market_prices)
 
         # 15:35 IST Post-Market EOD Report (Once per day)
-        if ist_hour == 15 and 35 <= ist_minute <= 40:
+        if ist_hour == 15 and 35 <= ist_minute < 40:
             if not getattr(sentinel, "_eod_dispatched_today", False):
                 sentinel.execute_eod_reconciliation_and_tearsheet(
                     session.portfolio.total_equity,
@@ -335,6 +335,17 @@ def main():
                 sentinel._eod_dispatched_today = True
         elif ist_hour != 15:
             sentinel._eod_dispatched_today = False
+
+        # 15:40 IST Autonomous Quantitative Research & Strategy Allocation (Once per day)
+        if ist_hour == 15 and 40 <= ist_minute <= 50:
+            if not getattr(sentinel, "_research_executed_today", False):
+                log_msg("[AUTONOMOUS RESEARCH] Triggering EOD backtesting & strategy allocation bot...")
+                manifest = sentinel.execute_eod_research_and_strategy_allocation()
+                selected = manifest.get("selected_strategy", "WAIT")
+                log_msg(f"[AUTONOMOUS RESEARCH] Completed. Strategy allocated for next session: {selected}")
+                sentinel._research_executed_today = True
+        elif ist_hour != 15:
+            sentinel._research_executed_today = False
 
         pos_val = session.portfolio.market_value_of_positions
         margin_used = pos_val / LEVERAGE

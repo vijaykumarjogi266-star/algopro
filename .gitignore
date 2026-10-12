@@ -65,6 +65,8 @@ data/processed/*
 !data/processed/.gitkeep
 data/features/*
 !data/features/.gitkeep
+data/decisions/*
+!data/decisions/.gitkeep
 
 # Logs
 logs/

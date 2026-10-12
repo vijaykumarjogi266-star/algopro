@@ -234,3 +234,8 @@ class StatisticalMetricsEngine:
             omega_ratio=round(omega_ratio, 4),
             is_statistically_significant=is_significant,
         )
+
+
+# Backward-compatibility alias
+StatMetricsEngine = StatisticalMetricsEngine
+StatisticalMetricsEngine.calculate_moments = StatisticalMetricsEngine.calculate_higher_moments

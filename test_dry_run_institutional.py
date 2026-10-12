@@ -23,12 +23,12 @@ def run_dry_test():
     print("ALGO LAB — INSTITUTIONAL DRY TEST & INTEGRATION VERIFICATION")
     print("=" * 70)
     passed_tests = 0
-    total_tests = 5
+    total_tests = 6
 
     # -------------------------------------------------------------
     # Test 1: Whalley-Wilmott Asymptotic Optimal Hedging Engine
     # -------------------------------------------------------------
-    print("\n[TEST 1/5] Whalley-Wilmott Asymptotic Hedging Engine...")
+    print("\n[TEST 1/6] Whalley-Wilmott Asymptotic Hedging Engine...")
     try:
         from services.derivatives_engine.greeks_hedging import WhalleyWilmottHedgingEngine
         
@@ -78,7 +78,7 @@ def run_dry_test():
     # -------------------------------------------------------------
     # Test 2: Double-Entry Financial Accounting Ledger Reconciler
     # -------------------------------------------------------------
-    print("\n[TEST 2/5] Double-Entry Ledger Reconciler...")
+    print("\n[TEST 2/6] Double-Entry Ledger Reconciler...")
     try:
         from services.execution_gateway.reconciliation_engine import DoubleEntryLedgerReconciler
         
@@ -122,7 +122,7 @@ def run_dry_test():
     # -------------------------------------------------------------
     # Test 3: Static AST Isolation Scanner & Execution Firewall
     # -------------------------------------------------------------
-    print("\n[TEST 3/5] Static AST Isolation Scanner & Firewall...")
+    print("\n[TEST 3/6] Static AST Isolation Scanner & Firewall...")
     try:
         from services.execution_gateway.safety_gateway import StaticASTIsolationScanner, ASTIsolationError
         
@@ -157,7 +157,7 @@ def run_dry_test():
     # -------------------------------------------------------------
     # Test 4: Zerodha Kite Connect 3.0 Rate Limiter & Basket Logic
     # -------------------------------------------------------------
-    print("\n[TEST 4/5] Zerodha Kite Connect 3.0 Adapter & Rate Limiting...")
+    print("\n[TEST 4/6] Zerodha Kite Connect 3.0 Adapter & Rate Limiting...")
     try:
         from services.paper_engine.adapters.zerodha import ZerodhaKiteAdapter
         from services.paper_engine.adapters.credentials import BrokerConnectionConfig, ExecutionEnvironment
@@ -188,7 +188,7 @@ def run_dry_test():
     # -------------------------------------------------------------
     # Test 5: Indian Market Microstructure (15:15 IST Cutoff Clock)
     # -------------------------------------------------------------
-    print("\n[TEST 5/5] Mandatory 15:15 IST Intraday Cutoff Logic...")
+    print("\n[TEST 5/6] Mandatory 15:15 IST Intraday Cutoff Logic...")
     try:
         # Simulate UTC timestamps around 15:15 IST (09:45 UTC)
         # Case A: 09:15 UTC (14:45 IST) -> Trading Active
@@ -210,6 +210,39 @@ def run_dry_test():
         passed_tests += 1
     except Exception as e:
         print(f"   [FAIL] Test 5 failed: {e}")
+
+    # -------------------------------------------------------------
+    # Test 6: Autonomous Research Bot & DSR Strategy Allocation Engine
+    # -------------------------------------------------------------
+    print("\n[TEST 6/6] Autonomous Research Bot & DSR Allocation Engine...")
+    try:
+        from services.research_engine.decision_bot import AutonomousResearchBot
+        
+        bot = AutonomousResearchBot()
+        # Verify decision engine with controlled candidates
+        dummy_diagnosis = {"market_regime": "TRENDING_BEAR", "ending_equity": 50000.0}
+        mock_candidates = [
+            {"strategy": "STRAT_A", "dsr": 0.98, "profit_factor": 1.45, "win_rate_pct": 56.0, "max_drawdown_pct": 6.5, "is_robust": True},
+            {"strategy": "STRAT_B", "dsr": 0.20, "profit_factor": 1.05, "win_rate_pct": 42.0, "max_drawdown_pct": 14.0, "is_robust": False},
+        ]
+        decision = bot.make_strategy_allocation_decision(dummy_diagnosis, mock_candidates)
+        print(f"   -> Selected Strategy: {decision['selected_strategy']} ({decision['risk_multiplier']}x)")
+        assert decision["selected_strategy"] == "STRAT_A", "Strategy with highest DSR * PF should be selected"
+        assert decision["risk_multiplier"] == 1.0, "Risk multiplier should be 1.0 for robust strategy"
+
+        # Verify fallback to WAIT when no candidates pass gate
+        non_robust = [
+            {"strategy": "STRAT_POOR", "dsr": 0.10, "profit_factor": 0.8, "win_rate_pct": 30.0, "max_drawdown_pct": 20.0, "is_robust": False}
+        ]
+        wait_decision = bot.make_strategy_allocation_decision(dummy_diagnosis, non_robust)
+        print(f"   -> Principle 2 (WAIT) Fallback Check: {wait_decision['selected_strategy']} ({wait_decision['risk_multiplier']}x)")
+        assert wait_decision["selected_strategy"] == "WAIT", "Should fall back to WAIT when no candidate is robust"
+        assert wait_decision["risk_multiplier"] == 0.0, "Risk multiplier should be 0.0 when WAIT"
+
+        print("   [PASS] Autonomous Research Bot & DSR Allocation Engine verified.")
+        passed_tests += 1
+    except Exception as e:
+        print(f"   [FAIL] Test 6 failed: {e}")
 
     # -------------------------------------------------------------
     # Final Summary
