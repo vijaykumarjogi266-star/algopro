@@ -177,6 +177,8 @@ class ExecutionLifecycleManager:
         if order.state != OrderLifecycleState.ORDER_PROPOSED:
             raise ValueError(f"Cannot evaluate risk on order in state {order.state}")
 
+        order.transition_to(OrderLifecycleState.RISK_CHECK_EVALUATED, reason="Submitting to Risk Engine")
+
         # 1. Exit / Square-off orders reduce portfolio exposure and should not be blocked by entry constraints
         if order.side == OrderSide.SELL:
             order.transition_to(OrderLifecycleState.ORDER_ACCEPTED, reason="Exit order approved for exposure reduction")
