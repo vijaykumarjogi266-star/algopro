@@ -1,0 +1,8 @@
+[Unit]
+Description=Algo Lab Self-Healing Watchdog Service
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/algopro/scripts/cloud/algolab-watchdog.sh

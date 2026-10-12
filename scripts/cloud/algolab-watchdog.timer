@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Algo Lab Self-Healing Watchdog every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Unit=algolab-watchdog.service
+
+[Install]
+WantedBy=timers.target

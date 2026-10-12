@@ -59,6 +59,8 @@ Thumbs.db
 # Databases & local data
 *.sqlite3
 *.db
+*.db-shm
+*.db-wal
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
