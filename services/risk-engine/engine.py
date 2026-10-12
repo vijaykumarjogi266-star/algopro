@@ -7,7 +7,7 @@ Adheres to Non-Negotiable Principles:
 """
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List, Any, Dict
 from services.risk_engine.contracts import (
     IRiskEngine,
     HardRiskLimits,
@@ -17,10 +17,19 @@ from services.risk_engine.contracts import (
 
 
 class RiskEngine(IRiskEngine):
-    """Concrete independent Risk Engine enforcing hard risk limits."""
+    """Concrete independent Risk Engine enforcing hard risk limits and extensible signal hooks."""
 
-    def __init__(self, limits: Optional[HardRiskLimits] = None):
+    def __init__(
+        self,
+        limits: Optional[HardRiskLimits] = None,
+        hooks: Optional[List[Any]] = None,
+    ):
         self.limits = limits or HardRiskLimits()
+        self.hooks = hooks or []
+
+    def register_hook(self, hook: Any) -> None:
+        """Registers a pluggable risk filter hook."""
+        self.hooks.append(hook)
 
     def evaluate(
         self,
@@ -32,6 +41,7 @@ class RiskEngine(IRiskEngine):
         current_daily_loss_pct: float,
         current_drawdown_pct: float,
         current_open_positions_count: int,
+        context: Optional[Dict[str, Any]] = None,
     ) -> RiskEvaluationResult:
         """Evaluates an order proposal against hard portfolio & asset-level limits."""
         now = datetime.now(timezone.utc)
@@ -107,6 +117,18 @@ class RiskEngine(IRiskEngine):
                 approved_quantity=0,
                 timestamp=now,
             )
+
+        # 8. Pluggable Risk Signal Hooks (VaR, Expected Shortfall, Tail Constraints)
+        for hook in self.hooks:
+            hook_result = hook.evaluate_hook(
+                symbol=symbol,
+                price=price,
+                proposed_quantity=proposed_quantity,
+                portfolio_value=current_portfolio_value,
+                context=context,
+            )
+            if hook_result is not None:
+                return hook_result
 
         # Approved
         return RiskEvaluationResult(

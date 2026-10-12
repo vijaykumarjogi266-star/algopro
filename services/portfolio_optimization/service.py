@@ -3,7 +3,7 @@ Algo Lab — Stage 9 Portfolio Optimization Service Interface
 """
 
 from datetime import date, datetime, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import hashlib
 
 from services.evaluation_engine.manifest import EvaluationEnvironment, ExperimentManifest

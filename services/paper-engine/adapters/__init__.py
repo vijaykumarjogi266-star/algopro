@@ -12,6 +12,7 @@ from services.paper_engine.adapters.base import (
     PaperExecutionProvider,
     SimulatedBrokerAdapter,
 )
+from services.paper_engine.adapters.zerodha import ZerodhaKiteAdapter
 
 __all__ = [
     "BrokerConnectionConfig",
@@ -22,4 +23,5 @@ __all__ = [
     "REAL_BROKER_EXECUTION_ENABLED",
     "PaperExecutionProvider",
     "SimulatedBrokerAdapter",
+    "ZerodhaKiteAdapter",
 ]

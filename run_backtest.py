@@ -7,8 +7,9 @@ import os
 from datetime import datetime, timezone
 import pandas as pd
 
-# Ensure proper path resolution
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+repo_root = os.path.abspath(os.path.dirname(__file__))
+sys.path.insert(0, repo_root)
+sys.path.insert(0, os.path.abspath(os.path.join(repo_root, "..")))
 
 from quant.strategies.vwap_reversion import VWAPReversion
 from data.schemas.contracts import OHLCVBar, TimeFrame, Exchange

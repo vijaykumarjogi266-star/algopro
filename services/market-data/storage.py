@@ -25,6 +25,7 @@ from data.schemas.contracts import (
     TimeFrame,
 )
 from apps.api.core.logging import get_logger
+from services.market_data.cache import LRUMarketDataCache
 
 logger = get_logger(__name__)
 
@@ -49,10 +50,11 @@ class DatasetManifest(BaseModel):
 class ParquetMarketDataStorage:
     """Manages Parquet storage partitions and DuckDB point-in-time query engine."""
 
-    def __init__(self, base_dir: str = "data/processed"):
+    def __init__(self, base_dir: str = "data/processed", cache_size: int = 128):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._duckdb_con = duckdb.connect(database=":memory:")
+        self.cache = LRUMarketDataCache(max_entries=cache_size)
 
     def get_partition_path(
         self, exchange: Exchange, timeframe: TimeFrame, symbol: str, year: int
@@ -139,6 +141,9 @@ class ParquetMarketDataStorage:
         with open(manifest_path, "w") as f:
             f.write(manifest.model_dump_json(indent=2))
 
+        # Update in-memory LRU cache
+        self.cache.put(exchange, timeframe, symbol, year, df)
+
         logger.info(
             "Persisted market data partition",
             extra={
@@ -154,11 +159,17 @@ class ParquetMarketDataStorage:
     def load_bars_as_polars(
         self, exchange: Exchange, timeframe: TimeFrame, symbol: str, year: int
     ) -> Optional[pl.DataFrame]:
-        """Loads a Parquet partition into a Polars DataFrame."""
+        """Loads a Parquet partition into a Polars DataFrame with LRU cache lookup."""
+        cached_df = self.cache.get(exchange, timeframe, symbol, year)
+        if cached_df is not None:
+            return cached_df
+
         path = self.get_partition_path(exchange, timeframe, symbol, year)
         if not path.exists():
             return None
-        return pl.read_parquet(path)
+        df = pl.read_parquet(path)
+        self.cache.put(exchange, timeframe, symbol, year, df)
+        return df
 
     def query_point_in_time_duckdb(
         self,
