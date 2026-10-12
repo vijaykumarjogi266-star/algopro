@@ -198,6 +198,130 @@ class TestEnhancementsSuite(unittest.TestCase):
         positions = adapter.get_positions()
         self.assertIn("net", positions)
 
+    # -------------------------------------------------------------
+    # 6. Statistical Significance & Deflated Sharpe Tests
+    # -------------------------------------------------------------
+    def test_deflated_sharpe_and_psr(self):
+        from services.evaluation_engine.stat_metrics import StatisticalMetricsEngine
+
+        np.random.seed(42)
+        # Synthetic daily returns with positive drift
+        daily_returns = list(np.random.normal(0.0012, 0.015, 252))
+
+        report_single = StatisticalMetricsEngine.evaluate_returns_series(
+            daily_returns,
+            periods_per_year=252,
+            number_of_trials=1,
+        )
+        self.assertGreater(report_single.annualized_sharpe, 0.5)
+        self.assertGreater(report_single.psr, 0.70)
+        self.assertGreater(report_single.omega_ratio, 1.0)
+
+        # Deflated Sharpe under 50 trials (multi-testing penalty)
+        report_multi = StatisticalMetricsEngine.evaluate_returns_series(
+            daily_returns,
+            periods_per_year=252,
+            number_of_trials=50,
+            var_trials=0.15,
+        )
+        self.assertLess(report_multi.dsr, report_multi.psr)
+        self.assertGreater(report_multi.expected_max_sharpe, 0.0)
+
+    # -------------------------------------------------------------
+    # 7. Factor Research & Rank IC Tests
+    # -------------------------------------------------------------
+    def test_factor_research_and_rank_ic(self):
+        from services.evaluation_engine.factor_research import FactorResearchEngine
+
+        # Panel of 5 symbols across 10 evaluation dates
+        symbols = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN"]
+        panel = []
+        for d in range(10):
+            # Perfect predictive synthetic factor (factor strongly predicts forward return)
+            factors = {s: float(i + 1) for i, s in enumerate(symbols)}
+            fwd_returns = {s: float((i + 1) * 0.01) for i, s in enumerate(symbols)}
+            panel.append((f"2026-01-{d+1:02d}", factors, fwd_returns))
+
+        report = FactorResearchEngine.evaluate_factor_panel(
+            panel,
+            factor_name="Test_Momentum_Factor",
+            periods_per_year=252,
+        )
+        self.assertEqual(report.factor_name, "Test_Momentum_Factor")
+        self.assertAlmostEqual(report.mean_rank_ic, 1.0, places=2)
+        self.assertTrue(report.is_monotonic)
+        self.assertGreater(report.long_short_spread, 0.0)
+
+    # -------------------------------------------------------------
+    # 8. Indian Exchange Microstructure & Statutory Costs Tests
+    # -------------------------------------------------------------
+    def test_indian_microstructure_and_costs(self):
+        from datetime import datetime, time
+        from services.market_data.indian_microstructure import (
+            IndianMicrostructureEngine,
+            IndianProductType,
+            IndianExchange,
+        )
+
+        # Pre-open session rejection
+        pre_open_dt = datetime(2026, 10, 12, 9, 10, 0)
+        valid, reason = IndianMicrostructureEngine.validate_execution_time(pre_open_dt)
+        self.assertFalse(valid)
+        self.assertIn("Pre-open", reason)
+
+        # Normal session approval
+        normal_dt = datetime(2026, 10, 12, 10, 30, 0)
+        valid_norm, _ = IndianMicrostructureEngine.validate_execution_time(normal_dt)
+        self.assertTrue(valid_norm)
+
+        # Circuit limit rejection
+        circuit_status = IndianMicrostructureEngine.evaluate_circuit_limits(
+            symbol="RELIANCE.NS",
+            current_price=1200.0,
+            previous_close=1000.0,
+            circuit_band_pct=0.20,
+            side="BUY",
+        )
+        self.assertTrue(circuit_status.is_at_upper_circuit)
+        self.assertFalse(circuit_status.can_buy)
+        self.assertIn("Upper Circuit", circuit_status.rejection_reason)
+
+        # Statutory costs: CNC vs MIS
+        cnc_cost = IndianMicrostructureEngine.calculate_statutory_costs(
+            side="BUY", price=1000.0, quantity=100, product=IndianProductType.CNC
+        )
+        mis_cost = IndianMicrostructureEngine.calculate_statutory_costs(
+            side="BUY", price=1000.0, quantity=100, product=IndianProductType.MIS
+        )
+        # CNC STT is higher than MIS buy (0 STT on intraday buy)
+        self.assertGreater(cnc_cost.stt, mis_cost.stt)
+        self.assertGreater(cnc_cost.total_cost, mis_cost.total_cost)
+
+    # -------------------------------------------------------------
+    # 9. Institutional Tearsheet Generator Tests
+    # -------------------------------------------------------------
+    def test_tearsheet_generator(self):
+        from services.evaluation_engine.tearsheet import TearsheetGenerator
+
+        # Simulated upward trending equity curve
+        equity_curve = [10000.0 * (1.0 + (i * 0.005)) for i in range(50)]
+        trades = [{"pnl": 150.0}, {"pnl": -50.0}, {"pnl": 200.0}]
+
+        sheet = TearsheetGenerator.generate_tearsheet(
+            strategy_id="strat_institutional_v1",
+            equity_curve=equity_curve,
+            trades=trades,
+            number_of_trials=5,
+            var_trials=0.08,
+        )
+        self.assertEqual(sheet.strategy_id, "strat_institutional_v1")
+        self.assertGreater(sheet.total_return, 0.0)
+        self.assertGreater(sheet.empirical_sharpe, 0.0)
+
+        rendered_md = TearsheetGenerator.render_markdown_tearsheet(sheet)
+        self.assertIn("Institutional Strategy Tearsheet", rendered_md)
+        self.assertIn("Deflated Sharpe (DSR)", rendered_md)
+
 
 if __name__ == "__main__":
     unittest.main()

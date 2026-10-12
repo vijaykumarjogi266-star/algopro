@@ -9,6 +9,14 @@ from services.market_data.registry import (
     DatasetNotFoundError,
 )
 
+from services.market_data.indian_microstructure import (
+    IndianMicrostructureEngine,
+    IndianProductType,
+    IndianExchange,
+    CircuitBandStatus,
+    StatutoryCostBreakdown,
+)
+
 __all__ = [
     "DatasetRecord",
     "DatasetRegistryStore",
@@ -16,4 +24,9 @@ __all__ = [
     "DatasetDriftError",
     "DatasetIntegrityError",
     "DatasetNotFoundError",
+    "IndianMicrostructureEngine",
+    "IndianProductType",
+    "IndianExchange",
+    "CircuitBandStatus",
+    "StatutoryCostBreakdown",
 ]
