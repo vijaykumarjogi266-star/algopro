@@ -77,6 +77,8 @@ class CircuitBreakerConfig:
     max_order_rate_per_sec: int = 10           # Rate limit cap (1.0s monotonic sliding window)
     watchdog_heartbeat_timeout_sec: float = 5.0 # Heartbeat watchdog timeout (5.0s monotonic)
     max_single_order_qty: int = 1_000_000       # Max shares per single order (1,000,000)
+    rearm_secret: Optional[str] = field(default=None, repr=False)
+    rearm_secret_hash: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self):
         for name, val in [

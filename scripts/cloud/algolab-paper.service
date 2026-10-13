@@ -22,5 +22,16 @@ LimitNPROC=4096
 MemoryMax=4G
 TasksMax=1024
 
+# Security Hardening
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/algopro/data
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+
 [Install]
 WantedBy=multi-user.target

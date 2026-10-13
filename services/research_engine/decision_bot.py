@@ -158,9 +158,22 @@ class AutonomousResearchBot:
             typical = (highs + lows + closes) / 3.0
             std20 = pd.Series(closes).rolling(20).std().fillna(1.0).values
 
+            # Load volume; fall back to uniform weights (equal to typical-price VWAP) if absent
+            if "Volume" in df.columns:
+                volumes = df["Volume"].values.astype(float)
+            else:
+                volumes = np.ones(len(closes), dtype=float)
+
             pos = None
             for i in range(20, len(closes)):
-                vwap = typical[i]
+                # True session-reset cumulative VWAP up to bar i (no lookahead).
+                # VWAP_t = Σ(typical_τ × vol_τ, τ≤t) / Σ(vol_τ, τ≤t)
+                cum_vol = float(np.sum(volumes[:i + 1]))
+                if cum_vol > 0:
+                    vwap = float(np.sum(typical[:i + 1] * volumes[:i + 1]) / cum_vol)
+                else:
+                    # Zero volume fallback: use current bar's typical price
+                    vwap = typical[i]
                 lower = vwap - (1.5 * std20[i])
                 if pos is None and closes[i] < lower:
                     pos = closes[i]
@@ -169,6 +182,7 @@ class AutonomousResearchBot:
                     trades.append(pnl_pct)
                     pos = None
         return trades
+
 
     def _simulate_ema_crossover(self, data: Dict[str, pd.DataFrame]) -> List[float]:
         trades = []

@@ -228,6 +228,13 @@ def get_run_status(
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Run '{run_id}' not found")
 
+    # Validate ownership/association: run must belong to requested experiment
+    if run.get("experiment_id") != experiment_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run '{run_id}' does not belong to experiment '{experiment_id}'"
+        )
+
     metrics_dict = json.loads(run["metrics_json"]) if run["metrics_json"] else None
     return RunStatusResponse(
         run_id=run["experiment_id"],
@@ -250,6 +257,13 @@ def get_run_results(
     run = service.store.get_run(run_id)
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Run '{run_id}' not found")
+
+    # Validate ownership/association: run must belong to requested experiment
+    if run.get("experiment_id") != experiment_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run '{run_id}' does not belong to experiment '{experiment_id}'"
+        )
 
     metrics_dict = json.loads(run["metrics_json"]) if run["metrics_json"] else None
     repro_dict = json.loads(run["reproducibility_json"]) if run["reproducibility_json"] else None
@@ -274,6 +288,13 @@ def get_run_audit_trail(
     run = service.store.get_run(run_id)
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Run '{run_id}' not found")
+
+    # Validate ownership/association: run must belong to requested experiment
+    if run.get("experiment_id") != experiment_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run '{run_id}' does not belong to experiment '{experiment_id}'"
+        )
 
     events = service.get_audit_trail(run_id)
     return [AuditEventResponse(**e) for e in events]

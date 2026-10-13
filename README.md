@@ -44,6 +44,25 @@ Capital preservation → Data integrity → Research integrity → Risk manageme
 
 ---
 
+## Platform Status & Implementation Maturity
+
+> **IMPORTANT NOTICE: PAPER-TRADING ONLY PLATFORM**
+>
+> Algo Lab is strictly configured with **zero live-trading execution capability** (`LIVE_TRADING_ENABLED = False`). All broker adapters and order engines operate in paper-simulation mode. Live capital deployment is disabled by architectural policy.
+
+| Component / Subsystem | Status | Description & Limitations |
+| :--- | :---: | :--- |
+| **Circuit Breaker Engine** | ✅ **Implemented & Verified** | Env-injected secrets, constant-time HMAC tokens, fail-closed production startup, full audit logging. |
+| **Backtest Simulation Engine** | ✅ **Implemented & Verified** | Point-in-time bar-by-bar execution, deterministic metrics calculation (Sharpe, Sortino, Drawdown), cost & slippage models. |
+| **Broker Credential Store** | ✅ **Implemented & Verified** | Fernet encryption at rest with separate key, strict `extra_params` allowlist, API secret redaction. |
+| **Daemon Risk Evaluation** | ✅ **Implemented & Verified** | Authoritative portfolio risk state, persistent session baselines and high-water mark, fail-closed daily loss limits. |
+| **Research Bot VWAP** | ✅ **Implemented & Verified** | True cumulative volume-weighted average price up to bar $t$, no lookahead bias, zero-volume handling. |
+| **Execution Gateway (Live Brokers)** | ⚠️ **Paper Prototype Only** | Zerodha Kite / mock adapters operate in paper mode only. Live orders fail closed. |
+| **Multi-Asset Portfolio Construction** | 🚧 **Prototype** | Risk-parity and mean-variance optimization modules available for research evaluation. |
+| **Colocated Low-Latency Execution** | 🔮 **Planned** | Direct FIX/FAST exchange connectivity is planned for future stages. |
+
+---
+
 ## Directory Architecture
 
 ```

@@ -3,6 +3,9 @@
 Entry point for the Algo Lab Quantitative Research Operating System API.
 """
 
+import hashlib
+import hmac
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -12,6 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from apps.api.core.auth import validate_api_key_at_startup
 from apps.api.core.config import settings
 from apps.api.core.logging import get_logger, setup_logging
 from apps.api.routes.health import router as health_router
@@ -32,6 +36,7 @@ logger = get_logger("algo_lab.api")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan management."""
+    validate_api_key_at_startup()
     logger.info(
         "Algo Lab OS API starting up",
         extra={
@@ -76,6 +81,27 @@ async def add_process_time_and_request_id(request: Request, call_next):
     response.headers["X-Process-Time"] = f"{process_time:.6f}"
     response.headers["X-Request-ID"] = request_id
     return response
+
+
+@app.middleware("http")
+async def enforce_api_key_on_mutations(request: Request, call_next):
+    """Enforces authentication on state-changing endpoints (POST, PUT, DELETE, PATCH)."""
+    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        env = os.environ.get("ENVIRONMENT", "development").lower()
+        expected_key = os.environ.get("ALGO_LAB_API_KEY", "").strip()
+
+        if expected_key:
+            api_key = request.headers.get("X-API-Key", "")
+            if not api_key:
+                return JSONResponse(status_code=401, content={"detail": "X-API-Key header required"})
+            provided_hash = hashlib.sha256(api_key.encode()).digest()
+            expected_hash = hashlib.sha256(expected_key.encode()).digest()
+            if not hmac.compare_digest(provided_hash, expected_hash):
+                return JSONResponse(status_code=403, content={"detail": "Invalid API key"})
+        elif env not in ("development", "dev", "test", "testing"):
+            return JSONResponse(status_code=500, content={"detail": "ALGO_LAB_API_KEY not configured in production"})
+
+    return await call_next(request)
 
 
 # Mount Root / Health probes

@@ -11,9 +11,11 @@ Runs a persistent real-time loop:
 
 import sys
 import os
+import sqlite3
 import time
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
+from typing import Dict, Optional, Tuple
 import pandas as pd
 import numpy as np
 
@@ -45,6 +47,94 @@ from services.paper_engine.autonomous_orchestrator import AutonomousSentinel
 from services.observability.network_guard import NetworkConnectivityGuard
 from services.backtest_engine.contracts import OrderSide, OrderType
 from services.backtest_engine.execution_lifecycle import ExecutionLifecycleManager
+
+
+# ---------------------------------------------------------------------------
+# Risk-state computation (pure function — fully unit-testable)
+# ---------------------------------------------------------------------------
+
+def compute_risk_state(
+    day_start_equity: float,
+    high_water_mark: float,
+    current_equity: float,
+) -> Dict[str, float]:
+    """Compute authoritative portfolio risk state.
+
+    Args:
+        day_start_equity: Equity at the beginning of the trading session.
+        high_water_mark: Highest equity seen since strategy inception/restart.
+        current_equity: Current mark-to-market portfolio value.
+
+    Returns:
+        dict with keys:
+            daily_loss_pct  — fraction of day-start equity lost today (0.0 = no loss).
+            drawdown_pct    — fraction below high-water mark.
+            new_high_water_mark — updated HWM (monotonically non-decreasing).
+    """
+    new_hwm = max(high_water_mark, current_equity)
+    daily_loss_pct = (
+        (day_start_equity - current_equity) / day_start_equity
+        if day_start_equity > 0 else 0.0
+    )
+    drawdown_pct = (
+        (new_hwm - current_equity) / new_hwm
+        if new_hwm > 0 else 0.0
+    )
+    return {
+        "daily_loss_pct": max(0.0, daily_loss_pct),
+        "drawdown_pct": max(0.0, drawdown_pct),
+        "new_high_water_mark": new_hwm,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Sentinel-state SQLite persistence (survives process restarts)
+# ---------------------------------------------------------------------------
+
+def _load_sentinel_state(db_path: str) -> Dict[str, object]:
+    """Load persisted sentinel state from SQLite. Returns defaults if not found."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sentinel_state (
+                key TEXT PRIMARY KEY,
+                value REAL NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        cursor = conn.execute("SELECT key, value, updated_at FROM sentinel_state")
+        rows = {r[0]: {"value": r[1], "date": r[2][:10]} for r in cursor.fetchall()}
+        conn.close()
+        return rows
+    except Exception as exc:
+        print(f"[DAEMON] Warning: Could not load sentinel state: {exc}", flush=True)
+        return {}
+
+
+def _save_sentinel_state(db_path: str, key: str, value: float) -> None:
+    """Persist a sentinel state value to SQLite."""
+    try:
+        conn = sqlite3.connect(db_path)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sentinel_state (
+                key TEXT PRIMARY KEY,
+                value REAL NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO sentinel_state(key, value, updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, now_iso),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        print(f"[DAEMON] Warning: Could not persist sentinel state: {exc}", flush=True)
+
+
 
 # Configuration Parameters
 INITIAL_CAPITAL = 10_000.0  # INR Base Capital
@@ -196,6 +286,28 @@ def main():
         max_daily_drawdown_pct=0.025,
         initial_capital=BUYING_POWER,
     )
+
+    # Load authoritative risk state from SQLite (survives process restarts)
+    _state = _load_sentinel_state(DB_PATH)
+    today_str = date.today().isoformat()
+    current_equity = session.portfolio.total_equity
+
+    # Restore day_start_equity if from today; otherwise reset to current equity
+    if "day_start_equity" in _state and _state["day_start_equity"]["date"] == today_str:
+        day_start_equity: float = float(_state["day_start_equity"]["value"])
+        log_msg(f"[RISK STATE] Restored day_start_equity from DB: INR {day_start_equity:,.2f}")
+    else:
+        day_start_equity = current_equity
+        _save_sentinel_state(DB_PATH, "day_start_equity", day_start_equity)
+        log_msg(f"[RISK STATE] New session day_start_equity: INR {day_start_equity:,.2f}")
+
+    # Restore high-water mark (never reset across restarts; only forward-progresses)
+    if "high_water_mark" in _state:
+        high_water_mark: float = max(float(_state["high_water_mark"]["value"]), current_equity)
+        log_msg(f"[RISK STATE] Restored high_water_mark from DB: INR {high_water_mark:,.2f}")
+    else:
+        high_water_mark = current_equity
+    _save_sentinel_state(DB_PATH, "high_water_mark", high_water_mark)
 
     cycle = 0
     trade_targets = {}  # {symbol: target_price}
@@ -371,14 +483,23 @@ def main():
                 max_shares = int((BUYING_POWER * 0.20) / price)
                 shares = max(1, min(shares, max_shares))
 
+                # Compute authoritative risk state before every risk-gate evaluation
+                risk_state = compute_risk_state(
+                    day_start_equity=day_start_equity,
+                    high_water_mark=high_water_mark,
+                    current_equity=session.portfolio.total_equity,
+                )
+                high_water_mark = risk_state["new_high_water_mark"]
+                _save_sentinel_state(DB_PATH, "high_water_mark", high_water_mark)
+
                 eval_res = risk_engine.evaluate(
                     symbol=sym,
                     price=price,
                     proposed_quantity=shares,
                     stop_loss=data["stop_loss"],
                     current_portfolio_value=session.portfolio.total_equity,
-                    current_daily_loss_pct=0.0,
-                    current_drawdown_pct=session.portfolio.max_drawdown_pct,
+                    current_daily_loss_pct=risk_state["daily_loss_pct"],  # authoritative
+                    current_drawdown_pct=risk_state["drawdown_pct"],       # authoritative
                     current_open_positions_count=len(session.portfolio.positions),
                     context={"historical_returns": data["historical_returns"]}
                 )

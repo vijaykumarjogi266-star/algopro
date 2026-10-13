@@ -9,9 +9,12 @@ from collections import deque
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import hmac
 import json
+import logging
 import math
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -25,7 +28,7 @@ from services.execution_gateway.contracts import (
     RateLimitExceededError,
 )
 
-ADMIN_AUTH_TOKEN_SECRET = "ADMIN_SECURE_REARM_SECRET_KEY_8899"
+logger = logging.getLogger(__name__)
 
 
 class CircuitBreakerEngine:
@@ -43,6 +46,23 @@ class CircuitBreakerEngine:
         self.config = config or CircuitBreakerConfig()
         self.state_file_path = state_file_path
         self._lock = threading.Lock()
+
+        # Secure rearm secret resolution (Fail-Closed in Production)
+        env = os.environ.get("ENVIRONMENT", "development").lower()
+        secret = self.config.rearm_secret or os.environ.get("CIRCUIT_BREAKER_REARM_SECRET")
+        secret_hash = self.config.rearm_secret_hash or os.environ.get("CIRCUIT_BREAKER_REARM_SECRET_HASH")
+
+        if not secret and not secret_hash:
+            if env in ("production", "prod", "staging"):
+                raise RuntimeError(
+                    "Production circuit breaker startup failed closed: "
+                    "CIRCUIT_BREAKER_REARM_SECRET or CIRCUIT_BREAKER_REARM_SECRET_HASH must be configured."
+                )
+            self._rearm_secret_digest: Optional[bytes] = None
+        elif secret_hash:
+            self._rearm_secret_digest = bytes.fromhex(secret_hash) if isinstance(secret_hash, str) else secret_hash
+        else:
+            self._rearm_secret_digest = hashlib.sha256(secret.encode("utf-8")).digest()
 
         # Monotonic time tracking for watchdog & rate limiter
         self._last_heartbeat_monotonic = time.monotonic()
@@ -154,8 +174,32 @@ class CircuitBreakerEngine:
     def admin_rearm(self, auth_token: str) -> bool:
         """Re-arm gateway from EMERGENCY_HALT back to NORMAL using admin key."""
         with self._lock:
-            if auth_token != ADMIN_AUTH_TOKEN_SECRET:
+            if not auth_token or not isinstance(auth_token, str):
+                logger.warning(
+                    "Circuit breaker rearm rejected: invalid token format",
+                    extra={"audit_event": "CIRCUIT_BREAKER_REARM_FAILED"},
+                )
                 return False
+
+            if self._rearm_secret_digest is None:
+                logger.warning(
+                    "Circuit breaker rearm rejected: no rearm secret configured",
+                    extra={"audit_event": "CIRCUIT_BREAKER_REARM_FAILED"},
+                )
+                return False
+
+            submitted_digest = hashlib.sha256(auth_token.encode("utf-8")).digest()
+            if not hmac.compare_digest(submitted_digest, self._rearm_secret_digest):
+                logger.warning(
+                    "Circuit breaker rearm rejected: authentication token mismatch",
+                    extra={"audit_event": "CIRCUIT_BREAKER_REARM_FAILED"},
+                )
+                return False
+
+            logger.info(
+                "Circuit breaker rearm accepted: Gateway restored to NORMAL",
+                extra={"audit_event": "CIRCUIT_BREAKER_REARM_SUCCESS"},
+            )
             self._state = GatewayState.NORMAL
             self._trip_reasons.clear()
             self._high_water_mark = self._current_equity
@@ -173,7 +217,7 @@ class CircuitBreakerEngine:
             self._persist_disk_state()
 
     def _persist_disk_state(self) -> None:
-        """Write persistent EMERGENCY_HALT state to disk with file locking."""
+        """Write persistent EMERGENCY_HALT state to disk with file locking and keyed HMAC digest."""
         if not self.state_file_path:
             return
         try:
@@ -183,8 +227,10 @@ class CircuitBreakerEngine:
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             }
             content = json.dumps(payload, sort_keys=True)
-            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            payload["digest"] = digest
+            # Use keyed HMAC digest if secret is available, or SHA-256 fallback
+            key = self._rearm_secret_digest or b"default_algo_lab_integrity_key"
+            digest = hmac.new(key, content.encode("utf-8"), hashlib.sha256).hexdigest()
+            payload["hmac_digest"] = digest
 
             dir_name = os.path.dirname(self.state_file_path)
             if dir_name:
@@ -199,18 +245,18 @@ class CircuitBreakerEngine:
                 temp_name = tf.name
 
             os.replace(temp_name, self.state_file_path)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "Failed to persist circuit breaker state to disk",
+                extra={"error": str(e), "state_path": self.state_file_path},
+            )
 
     def _clear_disk_state(self) -> None:
-        """Remove disk state file when re-armed."""
+        """Remove disk state file when re-armed. Raises if persistent clearance fails."""
         if not self.state_file_path:
             return
-        try:
-            if os.path.exists(self.state_file_path):
-                os.remove(self.state_file_path)
-        except Exception:
-            pass
+        if os.path.exists(self.state_file_path):
+            os.remove(self.state_file_path)
 
     def _restore_disk_state(self) -> None:
         """Restore gateway state from persistent disk file on startup (Fail-Closed Startup)."""
@@ -223,9 +269,28 @@ class CircuitBreakerEngine:
                 data = json.load(f)
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
+            # Validate keyed HMAC integrity if present
+            if "hmac_digest" in data:
+                expected_hmac = data.pop("hmac_digest")
+                content = json.dumps(data, sort_keys=True)
+                key = self._rearm_secret_digest or b"default_algo_lab_integrity_key"
+                computed = hmac.new(key, content.encode("utf-8"), hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(expected_hmac, computed):
+                    raise ValueError("Keyed HMAC digest mismatch on persisted state file (tampering detected)")
+
             if data.get("gateway_state") == GatewayState.EMERGENCY_HALT.value:
                 self._state = GatewayState.EMERGENCY_HALT
                 self._trip_reasons = data.get("trip_reasons", ["PERSISTED_DISK_HALT"])
-        except Exception:
+        except Exception as e:
+            logger.error(
+                "Failed to restore circuit breaker disk state; failing closed to EMERGENCY_HALT",
+                extra={"error": str(e), "state_path": self.state_file_path},
+            )
             self._state = GatewayState.EMERGENCY_HALT
             self._trip_reasons = ["CORRUPTED_DISK_STATE_FAIL_CLOSED"]
+
+    def __repr__(self) -> str:
+        return f"<CircuitBreakerEngine state={self._state.value} is_halted={self.is_halted} trip_reasons={self._trip_reasons}>"
+
+    def __str__(self) -> str:
+        return self.__repr__()

@@ -13,7 +13,10 @@ import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
-import duckdb
+try:
+    import duckdb
+except ImportError:
+    duckdb = None
 import polars as pl
 from pydantic import BaseModel, Field
 
@@ -53,7 +56,7 @@ class ParquetMarketDataStorage:
     def __init__(self, base_dir: str = "data/processed", cache_size: int = 128):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self._duckdb_con = duckdb.connect(database=":memory:")
+        self._duckdb_con = duckdb.connect(database=":memory:") if duckdb is not None else None
         self.cache = LRUMarketDataCache(max_entries=cache_size)
 
     def get_partition_path(
@@ -190,5 +193,7 @@ class ParquetMarketDataStorage:
             WHERE market_timestamp <= '{as_of_timestamp.isoformat()}'
             ORDER BY market_timestamp ASC
         """
+        if self._duckdb_con is None:
+            raise RuntimeError("DuckDB is not installed or available in this environment.")
         arrow_table = self._duckdb_con.execute(query).arrow()
         return pl.from_arrow(arrow_table)

@@ -1,0 +1,62 @@
+alembic==1.20.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+asyncpg==0.32.0
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+cryptography @ file:///home/builder/.termux-build/python-cryptography/src
+curl_cffi==0.16.3
+fastapi==0.143.0
+greenlet @ file:///home/builder/.termux-build/python-greenlet/src
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.1
+lxml @ file:///home/builder/.termux-build/python-lxml/src
+Mako==1.4.3
+MarkupSafe==3.0.4
+multitasking==0.0.13
+numpy @ file:///home/builder/.termux-build/python-numpy/src/dist/numpy-2.4.4-cp314-cp314-android_aarch64.whl#sha256=68ef31f0d8925d96da2b5e014c2c3d32a16dd68887329eeecb7f3a548222e24d
+opentelemetry-api==1.45.1
+packaging==26.3
+pandas @ file:///home/builder/.termux-build/python-pandas/src/dist/pandas-3.0.6-cp314-cp314-android_aarch64.whl#sha256=8fd8185e79b6233db730c9e66a45004b1291e0363b9ece8ba639da141dacadf8
+peewee==4.5.3
+platformdirs==4.13.0
+pluggy==1.6.0
+polars @ file:///home/builder/.termux-build/python-polars/src/py-polars/dist/polars-1.41.2-py3-none-any.whl#sha256=98a68b23cf19059547c01bf3e167c95fe5f814ed5e5d738754cdf136771214fe
+polars-runtime-32 @ file:///home/builder/.termux-build/python-polars/src/py-polars/polars_runtime_32-1.41.2-py314-none-any.whl#sha256=0ea45dc9ffed395e3288aed226abafd068afca2b799869112bf5ae3ef5cb5615
+prometheus_client==0.26.0
+proot-distro @ file:///home/builder/.termux-build/proot-distro/src
+protobuf==7.36.2
+pycparser==3.11
+pydantic==2.14.1
+pydantic-settings==2.15.0
+pydantic_core==2.50.1
+Pygments==2.21.0
+PyOTP==2.10.0
+pyparsing==3.3.2
+pytest==9.1.1
+pytest-asyncio==1.4.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.4
+python-json-logger==4.2.0
+pytz==2026.5
+rdflib==7.6.0
+requests==2.34.2
+scipy @ file:///home/builder/.termux-build/python-scipy/src/dist/scipy-1.18.1-cp314-cp314-android_aarch64.whl#sha256=26fa3c9be785483a304e9673dc82496f38bc950b92a3d1b6974b51abec20729f
+six==1.17.0
+soupsieve==3.0.3
+SQLAlchemy==2.1.4
+starlette==1.7.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.5
+urllib3==2.8.0
+uvicorn==0.54.0
+websockets==17.2
+yfinance==1.7.0

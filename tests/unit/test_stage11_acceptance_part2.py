@@ -18,7 +18,7 @@ from services.execution_gateway.contracts import (
     CircuitBreakerTripped,
     ASTIsolationError,
 )
-from services.execution_gateway.circuit_breaker import CircuitBreakerEngine, ADMIN_AUTH_TOKEN_SECRET
+from services.execution_gateway.circuit_breaker import CircuitBreakerEngine
 from services.execution_gateway.safety_gateway import ExecutionSafetyGateway, StaticASTIsolationScanner
 from services.execution_gateway.service import ExecutionGatewayService
 
@@ -91,12 +91,17 @@ def test_at_219_zero_price_order_payload_rejection():
 
 def test_at_220_manual_administrative_re_arming_gate():
     """AT-220: Verify administrative re-arming with correct key restores NORMAL state (INV-53)."""
-    cb = CircuitBreakerEngine()
+    test_secret = "test_secure_rearm_token_4921"
+    cb = CircuitBreakerEngine(config=CircuitBreakerConfig(rearm_secret=test_secret))
     cb.trigger_emergency_halt("TEST_HALT")
     assert cb.is_halted is True
 
-    # Re-arm with correct key
-    success = cb.admin_rearm(ADMIN_AUTH_TOKEN_SECRET)
+    # Re-arm with invalid key fails
+    assert cb.admin_rearm("wrong_invalid_key") is False
+    assert cb.is_halted is True
+
+    # Re-arm with correct key succeeds
+    success = cb.admin_rearm(test_secret)
     assert success is True
     assert cb.is_halted is False
     assert cb.state == GatewayState.NORMAL
