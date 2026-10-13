@@ -73,3 +73,6 @@ data/decisions/*
 # Logs
 logs/
 *.log
+
+data/intelligence/*
+!data/intelligence/.gitkeep
