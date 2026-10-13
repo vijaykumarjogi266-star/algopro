@@ -18,7 +18,7 @@ help:
 install:
 	pip install -r requirements.txt
 	@if command -v npm >/dev/null 2>&1; then \
-		npm --prefix apps/web install --prefer-offline --no-audit --no-fund; \
+		npm --prefix apps/web ci || npm --prefix apps/web install --prefer-offline --no-audit --no-fund; \
 	fi
 
 import-check:
@@ -39,7 +39,7 @@ typecheck:
 		./apps/web/node_modules/.bin/tsc -p apps/web/tsconfig.json --noEmit; \
 	fi
 	@if command -v mypy >/dev/null 2>&1; then \
-		mypy apps/ services/ --ignore-missing-imports --no-strict-optional || true; \
+		mypy apps/ services/ --ignore-missing-imports --no-strict-optional; \
 	fi
 
 test:
@@ -66,7 +66,7 @@ build: compile
 		./apps/web/node_modules/.bin/tsc -p apps/web/tsconfig.json --noEmit; \
 	fi
 	@if command -v npm >/dev/null 2>&1; then \
-		npm --prefix apps/web run build || echo "Notice: Next.js native SWC not supported on host architecture (ARM64 Android); builds in Linux CI"; \
+		npm --prefix apps/web run build; \
 	fi
 
 test-deployment:

@@ -17,7 +17,8 @@ BLOCKED_COUNT=0
 
 # 1. Dependency consistency and locks
 echo ">>> [1/11] Locked installation & dependency consistency..."
-test -f requirements.txt && test -f .python-version && test -f .nvmrc
+test -f requirements.txt && test -f .python-version && test -f .nvmrc && test -f requirements.lock
+! grep -q 'file:///home/builder' requirements.lock
 echo "[PASS] Dependency specifications and runtime lockfiles verified."
 
 # 2. Syntax, compilation, and linting
