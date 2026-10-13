@@ -210,7 +210,24 @@ class ExecutionLifecycleManager:
             )
             return order
 
-        # 2. Cash Solvency Pre-Trade Evaluation (BUY orders)
+        # 3. Respect approved quantity from Risk Engine
+        if risk_result.approved_quantity is not None:
+            if risk_result.approved_quantity <= 0:
+                order.rejection_code = (
+                    RiskRejectionCode.EXCEEDS_MAX_CAPITAL.value
+                    if hasattr(RiskRejectionCode.EXCEEDS_MAX_CAPITAL, "value")
+                    else str(RiskRejectionCode.EXCEEDS_MAX_CAPITAL)
+                )
+                order.rejection_reason = "Risk Engine approved quantity is 0"
+                order.transition_to(
+                    OrderLifecycleState.ORDER_REJECTED,
+                    reason=order.rejection_reason,
+                    rejection_code=order.rejection_code,
+                )
+                return order
+            order.quantity = risk_result.approved_quantity
+
+        # 4. Cash Solvency Pre-Trade Evaluation (BUY orders)
         if available_cash is not None and order.side == OrderSide.BUY:
             required_outflow = self.calculate_order_outflow(
                 side=order.side,
@@ -235,7 +252,7 @@ class ExecutionLifecycleManager:
         order.transition_to(
             OrderLifecycleState.ORDER_ACCEPTED,
             reason="Risk Engine approved order",
-            approved_quantity=risk_result.approved_quantity,
+            approved_quantity=order.quantity,
         )
 
         return order

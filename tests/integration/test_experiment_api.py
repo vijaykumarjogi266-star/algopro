@@ -25,14 +25,45 @@ import time
 from datetime import datetime, timezone, timedelta
 import pytest
 from httpx import ASGITransport, AsyncClient
+from typing import List, Tuple
 from unittest.mock import patch
 
 from apps.api.main import app
 from apps.api.routes.experiments import set_service, get_service
 from services.backtest_engine.service import BacktestService
 from services.backtest_engine.persistence import BacktestRunStore
+from services.market_data.registry import DatasetRecord, compute_dataset_checksum
 from services.risk_engine.engine import RiskEngine
 from services.risk_engine.contracts import HardRiskLimits
+from data.schemas.contracts import DataQualityStatus
+from data.schemas.canonical_market_data import CanonicalMarketDataBar
+
+
+def _build_test_bars() -> Tuple[List[CanonicalMarketDataBar], str]:
+    bars: List[CanonicalMarketDataBar] = []
+    base_ts = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
+    for sym in ["NIFTY50", "RELIANCE"]:
+        prices = [100.0] * 35 + [150.0 + i * 2.0 for i in range(25)]
+        for i, p in enumerate(prices):
+            bars.append(
+                CanonicalMarketDataBar(
+                    timestamp=base_ts + timedelta(days=i),
+                    symbol=sym,
+                    exchange="NSE",
+                    timeframe="1d",
+                    open=p,
+                    high=p + 1.0,
+                    low=p - 1.0,
+                    close=p,
+                    volume=10000.0,
+                    trade_count=100,
+                )
+            )
+    chk = compute_dataset_checksum(bars)
+    return bars, chk
+
+
+TEST_BARS, TEST_CHECKSUM = _build_test_bars()
 
 
 @pytest.fixture
@@ -40,6 +71,22 @@ def fresh_service():
     """Provides a fresh isolated in-memory BacktestService for each test."""
     store = BacktestRunStore(":memory:")
     svc = BacktestService(store=store, max_workers=2)
+    rec = DatasetRecord(
+        dataset_id="NSE_NIFTY50_DAILY",
+        name="Nifty 50 Daily",
+        version="2026.09.14",
+        exchange="NSE",
+        asset_class="EQUITY",
+        timeframe="1d",
+        symbols=["NIFTY50", "RELIANCE"],
+        start_date=TEST_BARS[0].timestamp,
+        end_date=TEST_BARS[-1].timestamp,
+        bar_count=len(TEST_BARS),
+        sha256_checksum=TEST_CHECKSUM,
+        quality_status=DataQualityStatus.VALID,
+    )
+    svc.dataset_store.register_dataset(rec)
+    svc.register_dataset_bars("NSE_NIFTY50_DAILY", TEST_BARS)
     set_service(svc)
     yield svc
 
@@ -61,7 +108,7 @@ def make_valid_payload(name="API Test Experiment"):
         "strategy_version": "1.0.0",
         "dataset_id": "NSE_NIFTY50_DAILY",
         "dataset_version": "2026.09.14",
-        "dataset_checksum": "f" * 64,
+        "dataset_checksum": TEST_CHECKSUM,
         "universe": ["NIFTY50", "RELIANCE"],
         "timeframe": "1d",
         "start_date": start.isoformat(),

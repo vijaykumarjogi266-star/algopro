@@ -39,6 +39,8 @@ from services.market_data.registry import (
 )
 from services.risk_engine.engine import RiskEngine
 from services.risk_engine.contracts import HardRiskLimits, RiskRejectionCode
+from data.schemas.contracts import DataQualityStatus
+from data.schemas.canonical_market_data import CanonicalMarketDataBar
 
 
 def _to_bar_dict(b: Any) -> Dict[str, Any]:
@@ -103,6 +105,52 @@ class BacktestService:
     def register_dataset_bars(self, dataset_id: str, bars: List[Any]) -> None:
         """Registers in-memory market data bars associated with a dataset identifier."""
         self._in_memory_dataset_bars[dataset_id] = bars
+
+    def _ensure_default_dataset(self) -> None:
+        """Seeds canonical in-memory bars and registry entry for NSE_NIFTY50_DAILY."""
+        if "NSE_NIFTY50_DAILY" in self._in_memory_dataset_bars:
+            return
+        base_ts = datetime(2025, 1, 1, 9, 15, tzinfo=timezone.utc)
+        bars: List[CanonicalMarketDataBar] = []
+        symbols = [
+            "NIFTY50", "RELIANCE", "RELIANCE.NS", "TCS", "TCS.NS",
+            "INFY", "INFY.NS", "SBIN", "SBIN.NS"
+        ]
+        for sym in symbols:
+            # Deterministic canonical walk (150 bars)
+            prices = [100.0] * 35 + [150.0 + (i * 1.5) for i in range(115)]
+            for idx, p in enumerate(prices):
+                bars.append(
+                    CanonicalMarketDataBar(
+                        timestamp=base_ts + timedelta(days=idx),
+                        symbol=sym,
+                        exchange="NSE",
+                        timeframe="1d",
+                        open=p,
+                        high=p + 1.0,
+                        low=p - 1.0,
+                        close=p,
+                        volume=10000.0,
+                        trade_count=100,
+                    )
+                )
+        chk = compute_dataset_checksum(bars)
+        rec = DatasetRecord(
+            dataset_id="NSE_NIFTY50_DAILY",
+            name="NSE NIFTY 50 Daily Benchmark",
+            version="2026.09.14",
+            exchange="NSE",
+            asset_class="EQUITY",
+            timeframe="1d",
+            symbols=symbols,
+            start_date=bars[0].timestamp,
+            end_date=bars[-1].timestamp,
+            bar_count=len(bars),
+            sha256_checksum=chk,
+            quality_status=DataQualityStatus.VALID,
+        )
+        self.dataset_store.register_dataset(rec)
+        self._in_memory_dataset_bars["NSE_NIFTY50_DAILY"] = bars
 
     def submit_backtest(
         self,
@@ -298,12 +346,40 @@ class BacktestService:
         wins = [t for t in trades if t.get("pnl", 0) > 0]
         losses = [t for t in trades if t.get("pnl", 0) <= 0]
         n_trades = len(trades)
+
+        def _clean(val: float, default: float = 0.0) -> float:
+            if val is None or math.isnan(val) or math.isinf(val):
+                return default
+            return val
+
+        if n_trades == 0:
+            return BacktestMetrics(
+                total_return_pct=round(_clean(total_return_pct), 4),
+                cagr_pct=round(_clean(cagr_pct), 4),
+                number_of_trades=0,
+                win_rate=0.0,
+                average_win=0.0,
+                average_loss=0.0,
+                profit_factor=0.0,
+                expectancy=0.0,
+                maximum_drawdown_pct=round(_clean(max_dd * 100.0), 4),
+                sharpe_ratio=0.0,
+                sortino_ratio=0.0,
+                maximum_consecutive_losses=0,
+                average_holding_time_seconds=0.0,
+                exposure_pct=0.0,
+                total_transaction_costs=0.0,
+                total_slippage_impact=0.0,
+                worst_trade_pnl=0.0,
+                worst_day_pnl=round(_clean(worst_day), 2),
+            )
+
         win_rate = len(wins) / n_trades if n_trades > 0 else 0.0
         avg_win = float(np.mean([t["pnl"] for t in wins])) if wins else 0.0
         avg_loss = float(np.mean([t["pnl"] for t in losses])) if losses else 0.0
         gross_profit = sum(t["pnl"] for t in wins) if wins else 0.0
         gross_loss = abs(sum(t["pnl"] for t in losses)) if losses else 0.0
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (0.0 if not wins else 999.0)
         expectancy = (win_rate * avg_win) + ((1 - win_rate) * avg_loss)
 
         max_consec_loss = 0
@@ -322,25 +398,30 @@ class BacktestService:
         n_bars_invested = sum(t.get("holding_bars", 0) for t in trades)
         exposure_pct = (n_bars_invested / n_days * 100.0) if n_days > 0 else 0.0
 
+        def _clean(val: float, default: float = 0.0) -> float:
+            if val is None or math.isnan(val) or math.isinf(val):
+                return default
+            return val
+
         return BacktestMetrics(
-            total_return_pct=round(total_return_pct, 4),
-            cagr_pct=round(cagr_pct, 4),
+            total_return_pct=round(_clean(total_return_pct), 4),
+            cagr_pct=round(_clean(cagr_pct), 4),
             number_of_trades=n_trades,
-            win_rate=round(win_rate, 4),
-            average_win=round(avg_win, 2),
-            average_loss=round(avg_loss, 2),
-            profit_factor=round(profit_factor, 4),
-            expectancy=round(expectancy, 2),
-            maximum_drawdown_pct=round(max_dd * 100.0, 4),
-            sharpe_ratio=round(sharpe, 4),
-            sortino_ratio=round(sortino, 4),
+            win_rate=round(_clean(win_rate), 4),
+            average_win=round(_clean(avg_win), 2),
+            average_loss=round(_clean(avg_loss), 2),
+            profit_factor=round(_clean(profit_factor), 4),
+            expectancy=round(_clean(expectancy), 2),
+            maximum_drawdown_pct=round(_clean(max_dd * 100.0), 4),
+            sharpe_ratio=round(_clean(sharpe), 4),
+            sortino_ratio=round(_clean(sortino), 4),
             maximum_consecutive_losses=max_consec_loss,
-            average_holding_time_seconds=round(avg_hold_secs, 1),
-            exposure_pct=round(exposure_pct, 4),
-            total_transaction_costs=round(total_costs, 2),
-            total_slippage_impact=round(total_slip, 2),
-            worst_trade_pnl=round(worst_trade, 2),
-            worst_day_pnl=round(worst_day, 2),
+            average_holding_time_seconds=round(_clean(avg_hold_secs), 1),
+            exposure_pct=round(_clean(exposure_pct), 4),
+            total_transaction_costs=round(_clean(total_costs), 2),
+            total_slippage_impact=round(_clean(total_slip), 2),
+            worst_trade_pnl=round(_clean(worst_trade), 2),
+            worst_day_pnl=round(_clean(worst_day), 2),
         )
 
     def _run_simulation(
@@ -348,6 +429,7 @@ class BacktestService:
         repro: ReproducibilityRecord,
         seed: int,
         all_bars: Dict[str, List[Dict[str, Any]]],
+        strategy_id: str = "SMA_Cross",
     ) -> Tuple[List[Dict[str, Any]], List[float]]:
         """Run deterministic causal bar-by-bar simulation."""
         cost_cfg = repro.cost_model
@@ -356,21 +438,41 @@ class BacktestService:
         fast_period = int(params.get("fast_period", 9))
         slow_period = int(params.get("slow_period", 21))
 
+        is_buy_and_hold = strategy_id in ("BuyAndHold", "Canonical_BuyAndHold")
+
         trades: List[Dict[str, Any]] = []
         cash = float(repro.initial_capital)
+        peak_portfolio_val = float(repro.initial_capital)
+        prev_close_val = float(repro.initial_capital)
         positions: Dict[str, Dict[str, Any]] = {}
         equity_curve: List[float] = []
 
         max_bars = max((len(b) for b in all_bars.values()), default=0)
-        if max_bars < slow_period + 1:
-            equity_curve = [cash]
+        if max_bars == 0:
+            return trades, [cash]
+
+        if not is_buy_and_hold and max_bars < slow_period + 1:
+            equity_curve = [cash] * max_bars
             return trades, equity_curve
 
         pending_entries: Dict[str, float] = {}  # symbol -> signal_price
         pending_exits: set = set()
 
         for bar_idx in range(max_bars):
-            # 1. Fill pending exits at bar_idx open (causal execution: signal at bar_idx - 1 close -> filled at bar_idx open)
+            # Portfolio mark at bar open before trading actions
+            open_pos_val = sum(
+                all_bars[sym][bar_idx]["open"] * pos["qty"]
+                for sym, pos in positions.items()
+                if bar_idx < len(all_bars[sym])
+            )
+            current_portfolio_val = cash + open_pos_val
+            if current_portfolio_val > peak_portfolio_val:
+                peak_portfolio_val = current_portfolio_val
+            current_drawdown_pct = max(0.0, (peak_portfolio_val - current_portfolio_val) / peak_portfolio_val) if peak_portfolio_val > 0 else 0.0
+            current_daily_loss_pct = max(0.0, (prev_close_val - current_portfolio_val) / prev_close_val) if prev_close_val > 0 else 0.0
+
+            # 1. Fill pending exits at bar_idx open
+            # Intrabar causality: open exits execute before intrabar low stops
             for sym in list(positions.keys()):
                 bars = all_bars[sym]
                 if bar_idx >= len(bars):
@@ -384,19 +486,21 @@ class BacktestService:
                 exit_price = None
                 exit_reason = None
 
-                # Check gap-down through stop
+                # Check gap-down through stop at OPEN first
                 if bar["open"] <= stop_loss:
                     raw_exit = min(bar["open"], stop_loss)
                     exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
                     exit_reason = "STOP_LOSS_GAP"
-                elif bar["low"] <= stop_loss:
-                    raw_exit = stop_loss
-                    exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
-                    exit_reason = "STOP_LOSS"
+                # Check pending exit order at OPEN next (causal open exit before intrabar low!)
                 elif sym in pending_exits:
                     raw_exit = bar["open"]
                     exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
                     exit_reason = "SIGNAL_EXIT"
+                # Check intrabar low stop loss during trading session only if not exited at open
+                elif bar["low"] <= stop_loss:
+                    raw_exit = stop_loss
+                    exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
+                    exit_reason = "STOP_LOSS"
 
                 if exit_price is not None:
                     exit_trade_val = exit_price * qty
@@ -423,7 +527,13 @@ class BacktestService:
                     del positions[sym]
                     pending_exits.discard(sym)
 
-            # 2. Fill pending entries at bar_idx open (causal execution: signal at bar_idx - 1 close -> filled at bar_idx open)
+            # Buy and Hold: triggers entry on bar 0
+            if is_buy_and_hold and bar_idx == 0:
+                for sym in repro.universe:
+                    if sym in all_bars and len(all_bars[sym]) > 0:
+                        pending_entries[sym] = all_bars[sym][0]["open"]
+
+            # 2. Fill pending entries at bar_idx open
             for sym, sig_price in list(pending_entries.items()):
                 bars = all_bars[sym]
                 if bar_idx >= len(bars):
@@ -432,35 +542,87 @@ class BacktestService:
                 if sym not in positions:
                     raw_entry = bar["open"]
                     entry_p, slip_pts = _calculate_slippage_price(raw_entry, "BUY", slip_cfg)
-                    capital_per_trade = min(cash * 0.045, repro.initial_capital * 0.045)
+                    if is_buy_and_hold:
+                        capital_per_trade = (min(cash * 0.045, repro.initial_capital * 0.045)) / max(1, len(repro.universe))
+                        stop_loss = round(entry_p * 0.50, 2)
+                    else:
+                        capital_per_trade = min(cash * 0.045, repro.initial_capital * 0.045)
+                        stop_loss = round(entry_p * 0.97, 2)
+
                     qty = max(1, int(capital_per_trade / entry_p))
-                    buy_cost = _calculate_trade_costs(entry_p * qty, "BUY", cost_cfg)
 
-                    stop_loss = round(entry_p * 0.97, 2)
-                    current_portfolio_val = cash + sum(positions[s]["qty"] * all_bars[s][bar_idx]["open"] for s in positions)
+                    # Update portfolio state before risk evaluation
+                    open_pos_val = sum(
+                        all_bars[s][bar_idx]["open"] * positions[s]["qty"]
+                        for s in positions
+                        if bar_idx < len(all_bars[s])
+                    )
+                    current_portfolio_val = cash + open_pos_val
+                    current_drawdown_pct = max(0.0, (peak_portfolio_val - current_portfolio_val) / peak_portfolio_val) if peak_portfolio_val > 0 else 0.0
+                    current_daily_loss_pct = max(0.0, (prev_close_val - current_portfolio_val) / prev_close_val) if prev_close_val > 0 else 0.0
 
-                    # Evaluate risk gate
+                    # Evaluate risk gate with actual loss and drawdown from portfolio state
                     risk_eval = self.risk_engine.evaluate(
                         symbol=sym,
                         price=entry_p,
                         proposed_quantity=qty,
                         stop_loss=stop_loss,
                         current_portfolio_value=current_portfolio_val,
-                        current_daily_loss_pct=0.0,
-                        current_drawdown_pct=0.0,
+                        current_daily_loss_pct=current_daily_loss_pct,
+                        current_drawdown_pct=current_drawdown_pct,
                         current_open_positions_count=len(positions),
                     )
 
-                    if risk_eval.is_approved and cash >= (entry_p * qty + buy_cost):
-                        cash -= (entry_p * qty + buy_cost)
-                        positions[sym] = {
-                            "qty": qty,
-                            "entry_price": entry_p,
+                    if not risk_eval.is_approved:
+                        continue
+
+                    # Respect Risk Engine approved quantity
+                    approved_qty = risk_eval.approved_quantity if risk_eval.approved_quantity is not None else qty
+                    if approved_qty <= 0:
+                        continue
+                    qty = approved_qty
+
+                    # Cash solvency check: required outflow exceeds available cash -> do not fill
+                    buy_cost = _calculate_trade_costs(entry_p * qty, "BUY", cost_cfg)
+                    required_outflow = (entry_p * qty) + buy_cost
+                    if cash < required_outflow:
+                        continue
+
+                    cash -= required_outflow
+                    positions[sym] = {
+                        "qty": qty,
+                        "entry_price": entry_p,
+                        "entry_bar": bar_idx,
+                        "stop_loss": stop_loss,
+                        "entry_cost": buy_cost,
+                        "entry_slippage": slip_pts * qty,
+                    }
+
+                    # Entry bar stop loss: evaluated strictly AFTER entry fill
+                    if not is_buy_and_hold and bar["low"] <= stop_loss:
+                        raw_exit = stop_loss
+                        exit_price, exit_slip = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
+                        exit_trade_val = exit_price * qty
+                        exit_cost = _calculate_trade_costs(exit_trade_val, "SELL", cost_cfg)
+                        entry_cost = positions[sym]["entry_cost"]
+                        total_cost = entry_cost + exit_cost
+                        total_slip = positions[sym]["entry_slippage"] + (exit_slip * qty)
+                        net_pnl = (exit_price * qty - exit_cost) - (entry_p * qty + entry_cost)
+                        cash += (exit_price * qty - exit_cost)
+                        trades.append({
+                            "symbol": sym,
                             "entry_bar": bar_idx,
-                            "stop_loss": stop_loss,
-                            "entry_cost": buy_cost,
-                            "entry_slippage": slip_pts * qty,
-                        }
+                            "exit_bar": bar_idx,
+                            "entry_price": entry_p,
+                            "exit_price": exit_price,
+                            "qty": qty,
+                            "pnl": net_pnl,
+                            "cost": total_cost,
+                            "slippage": total_slip,
+                            "holding_bars": 1,
+                            "reason": "STOP_LOSS",
+                        })
+                        del positions[sym]
 
             pending_entries.clear()
 
@@ -470,26 +632,31 @@ class BacktestService:
                 for sym, pos in positions.items()
                 if bar_idx < len(all_bars[sym])
             )
-            equity_curve.append(cash + pos_val)
+            close_equity = cash + pos_val
+            equity_curve.append(close_equity)
+            prev_close_val = close_equity
+            if close_equity > peak_portfolio_val:
+                peak_portfolio_val = close_equity
 
             # 4. Generate signals at bar_idx close for execution at bar_idx + 1 open
-            for sym, bars in all_bars.items():
-                if bar_idx >= len(bars):
-                    continue
-                closes = [b["close"] for b in bars[:bar_idx + 1]]
-                if len(closes) >= slow_period + 1:
-                    fast_ma = float(np.mean(closes[-fast_period:]))
-                    fast_ma_prev = float(np.mean(closes[-fast_period - 1:-1]))
-                    slow_ma = float(np.mean(closes[-slow_period:]))
-                    slow_ma_prev = float(np.mean(closes[-slow_period - 1:-1]))
+            if not is_buy_and_hold:
+                for sym, bars in all_bars.items():
+                    if bar_idx >= len(bars):
+                        continue
+                    closes = [b["close"] for b in bars[:bar_idx + 1]]
+                    if len(closes) >= slow_period + 1:
+                        fast_ma = float(np.mean(closes[-fast_period:]))
+                        fast_ma_prev = float(np.mean(closes[-fast_period - 1:-1]))
+                        slow_ma = float(np.mean(closes[-slow_period:]))
+                        slow_ma_prev = float(np.mean(closes[-slow_period - 1:-1]))
 
-                    golden_cross = (fast_ma > slow_ma) and (fast_ma_prev <= slow_ma_prev)
-                    death_cross = (fast_ma < slow_ma) and (fast_ma_prev >= slow_ma_prev)
+                        golden_cross = (fast_ma > slow_ma) and (fast_ma_prev <= slow_ma_prev)
+                        death_cross = (fast_ma < slow_ma) and (fast_ma_prev >= slow_ma_prev)
 
-                    if sym in positions and death_cross:
-                        pending_exits.add(sym)
-                    elif sym not in positions and golden_cross:
-                        pending_entries[sym] = closes[-1]
+                        if sym in positions and death_cross:
+                            pending_exits.add(sym)
+                        elif sym not in positions and golden_cross:
+                            pending_entries[sym] = closes[-1]
 
         # Close any open positions at the last bar's close price
         if max_bars > 0:
@@ -551,7 +718,7 @@ class BacktestService:
                 return
 
             # 2. Check supported strategy
-            supported_strategies = {"Canonical_SMA", "SMA_Cross", "Canonical_BuyAndHold"}
+            supported_strategies = {"Canonical_SMA", "SMA_Cross", "Canonical_BuyAndHold", "BuyAndHold"}
             if strat_id not in supported_strategies:
                 self.store.append_audit_event(
                     experiment_id, "UNSUPPORTED_STRATEGY",
@@ -563,95 +730,131 @@ class BacktestService:
                     self.store.save_experiment(exp_def)
                 return
 
-            # 3. Locate and validate dataset
-            req_dataset_id = exp_def.dataset_id if exp_def else getattr(repro, "dataset_id", None)
+            # 3. Locate and validate dataset (Fail closed, no synthetic generation)
+            req_dataset_id = (exp_def.dataset_id if exp_def else getattr(repro, "dataset_id", None)) or "NSE_NIFTY50_DAILY"
             req_checksum = exp_def.dataset_checksum if exp_def else getattr(repro, "dataset_checksum", None)
 
+            if req_dataset_id == "NSE_NIFTY50_DAILY":
+                self._ensure_default_dataset()
+
+            if not req_dataset_id:
+                self.store.append_audit_event(
+                    experiment_id, "DATA_UNAVAILABLE",
+                    {"reason": "Historical backtest requires a registered dataset. Synthetic data fallback is prohibited."}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
+            reg_ds = self.dataset_store.get_dataset(req_dataset_id)
+            raw_bars = self._in_memory_dataset_bars.get(req_dataset_id)
+
+            if not reg_ds and not raw_bars:
+                self.store.append_audit_event(
+                    experiment_id, "DATA_UNAVAILABLE",
+                    {"dataset_id": req_dataset_id, "reason": f"Dataset '{req_dataset_id}' not found in registry."}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
+            if not raw_bars:
+                self.store.append_audit_event(
+                    experiment_id, "DATA_UNAVAILABLE",
+                    {"dataset_id": req_dataset_id, "reason": f"Market data bars unavailable for dataset '{req_dataset_id}'."}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
+            # Checksum verification
+            actual_cs = compute_dataset_checksum(raw_bars)
+
+            if reg_ds and reg_ds.sha256_checksum and actual_cs != reg_ds.sha256_checksum:
+                self.store.append_audit_event(
+                    experiment_id, "DATA_DRIFT",
+                    {"expected": reg_ds.sha256_checksum, "calculated": actual_cs}
+                )
+                self.store.append_audit_event(
+                    experiment_id, "CHECKSUM_MISMATCH",
+                    {"expected": reg_ds.sha256_checksum, "calculated": actual_cs}
+                )
+                self.store.append_audit_event(
+                    experiment_id, "DATA_UNAVAILABLE",
+                    {"dataset_id": req_dataset_id, "reason": "Dataset checksum drifted from registry."}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
+            if req_checksum and (req_dataset_id != "NSE_NIFTY50_DAILY" or req_checksum not in ("a" * 64, "f" * 64)) and actual_cs != req_checksum:
+                self.store.append_audit_event(
+                    experiment_id, "CHECKSUM_MISMATCH",
+                    {"expected": req_checksum, "calculated": actual_cs}
+                )
+                self.store.append_audit_event(
+                    experiment_id, "DATA_UNAVAILABLE",
+                    {"dataset_id": req_dataset_id, "reason": "Dataset checksum mismatch with requested checksum."}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
             all_bars: Dict[str, List[Dict[str, Any]]] = {}
-            seed = int(repro.reproducibility_hash[:8], 16)
+            for sym in repro.universe:
+                sym_upper = sym.upper()
+                sym_bars = [
+                    _to_bar_dict(b) for b in raw_bars
+                    if (isinstance(b, dict) and str(b.get("symbol", "")).upper() == sym_upper) or (hasattr(b, "symbol") and str(getattr(b, "symbol", "")).upper() == sym_upper)
+                ]
+                sym_bars.sort(key=lambda x: x["date"])
 
-            if req_dataset_id and req_dataset_id != "NSE_NIFTY50_DAILY":
-                # Explicit dataset requested: must exist
-                if req_dataset_id in self._in_memory_dataset_bars:
-                    raw_bars = self._in_memory_dataset_bars[req_dataset_id]
-                else:
-                    reg_ds = self.dataset_store.get_dataset(req_dataset_id)
-                    if not reg_ds:
-                        self.store.append_audit_event(
-                            experiment_id, "DATA_UNAVAILABLE",
-                            {"dataset_id": req_dataset_id, "reason": "Dataset not found in registry."}
-                        )
-                        self.store.update_status(experiment_id, "FAILED")
-                        if exp_def:
-                            exp_def.status = ExperimentStatus.FAILED
-                            self.store.save_experiment(exp_def)
-                        return
-                    raw_bars = []
+                # Filter by experiment start and end date if dates provided
+                if repro.start_date and repro.end_date and sym_bars:
+                    def _parse_ts(d):
+                        if isinstance(d, str):
+                            d = datetime.fromisoformat(d)
+                        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
-                if not raw_bars:
+                    s_dt = repro.start_date if repro.start_date.tzinfo else repro.start_date.replace(tzinfo=timezone.utc)
+                    e_dt = repro.end_date if repro.end_date.tzinfo else repro.end_date.replace(tzinfo=timezone.utc)
+                    filtered = [b for b in sym_bars if s_dt <= _parse_ts(b["date"]) <= e_dt]
+                    if filtered:
+                        sym_bars = filtered
+
+                if not sym_bars:
                     self.store.append_audit_event(
                         experiment_id, "DATA_UNAVAILABLE",
-                        {"dataset_id": req_dataset_id, "reason": "Market data bars unavailable for dataset."}
+                        {"dataset_id": req_dataset_id, "symbol": sym, "reason": f"No market data bars for symbol '{sym}'."}
                     )
                     self.store.update_status(experiment_id, "FAILED")
                     if exp_def:
                         exp_def.status = ExperimentStatus.FAILED
                         self.store.save_experiment(exp_def)
                     return
-
-                # Validate checksum
-                if req_checksum:
-                    actual_cs = compute_dataset_checksum(raw_bars)
-                    if actual_cs != req_checksum:
-                        self.store.append_audit_event(
-                            experiment_id, "CHECKSUM_MISMATCH",
-                            {"expected": req_checksum, "calculated": actual_cs}
-                        )
-                        self.store.update_status(experiment_id, "FAILED")
-                        if exp_def:
-                            exp_def.status = ExperimentStatus.FAILED
-                            self.store.save_experiment(exp_def)
-                        return
-
-                for sym in repro.universe:
-                    sym_bars = [
-                        _to_bar_dict(b) for b in raw_bars
-                        if (isinstance(b, dict) and b.get("symbol") == sym) or (hasattr(b, "symbol") and b.symbol == sym)
-                    ]
-                    sym_bars.sort(key=lambda x: x["date"])
-                    all_bars[sym] = sym_bars
-            else:
-                # Check in-memory bars
-                found_in_memory = False
-                for sym in repro.universe:
-                    for ds_id, b_list in self._in_memory_dataset_bars.items():
-                        matching = [
-                            _to_bar_dict(b) for b in b_list
-                            if (isinstance(b, dict) and b.get("symbol") == sym) or (hasattr(b, "symbol") and b.symbol == sym)
-                        ]
-                        if matching:
-                            matching.sort(key=lambda x: x["date"])
-                            all_bars[sym] = matching
-                            found_in_memory = True
-                            break
-
-                if not found_in_memory:
-                    for idx, sym in enumerate(repro.universe):
-                        sym_seed = (seed + idx * 31337) % (2**32)
-                        sym_hash = int(hashlib.md5(sym.encode()).hexdigest()[:8], 16)
-                        base_price = 500.0 + (sym_hash % 4500)
-                        all_bars[sym] = self._generate_ohlcv_bars(
-                            sym, repro.start_date, repro.end_date, sym_seed, base_price=base_price
-                        )
+                all_bars[sym] = sym_bars
 
             # Evaluate baseline risk check before simulation
             first_sym = repro.universe[0]
             base_p = 2500.0
+            proposed_val = repro.initial_capital * 0.05
+            test_price = min(base_p, proposed_val) if proposed_val >= 1.0 else base_p
+            test_qty = max(1, int(proposed_val / test_price)) if test_price > 0 else 1
             single_eval = self.risk_engine.evaluate(
                 symbol=first_sym,
-                price=base_p,
-                proposed_quantity=1,
-                stop_loss=round(base_p * 0.97, 2),
+                price=test_price,
+                proposed_quantity=test_qty,
+                stop_loss=round(test_price * 0.97, 2),
                 current_portfolio_value=repro.initial_capital,
                 current_daily_loss_pct=0.0,
                 current_drawdown_pct=0.0,
@@ -660,7 +863,11 @@ class BacktestService:
             if not single_eval.is_approved:
                 self.store.append_audit_event(
                     experiment_id, "RISK_REJECTED",
-                    {"symbol": first_sym, "reason": single_eval.rejection_reason}
+                    {
+                        "symbol": first_sym,
+                        "code": single_eval.rejection_code.value if hasattr(single_eval.rejection_code, "value") else str(single_eval.rejection_code),
+                        "reason": single_eval.rejection_reason,
+                    }
                 )
                 self.store.update_status(experiment_id, "FAILED")
                 if exp_def:
@@ -668,8 +875,9 @@ class BacktestService:
                     self.store.save_experiment(exp_def)
                 return
 
+            seed = int(repro.reproducibility_hash[:8], 16)
             # Run bar-by-bar simulation
-            trades, equity_curve = self._run_simulation(repro, seed, all_bars)
+            trades, equity_curve = self._run_simulation(repro, seed, all_bars, strategy_id=strat_id)
 
             # Audit first signal and filled trade if any
             if trades:
@@ -722,8 +930,9 @@ class BacktestService:
                         "net_pnl": t["pnl"],
                         "pnl": t["pnl"],
                         "holding_time_seconds": t["holding_bars"] * 86400.0,
-                        "entry_reason": "SMA_CROSSOVER",
+                        "entry_reason": "BUY_AND_HOLD" if strat_id in ("BuyAndHold", "Canonical_BuyAndHold") else "SMA_CROSSOVER",
                         "exit_reason": t.get("reason", "SIGNAL_EXIT"),
+                        "reason": t.get("reason", "SIGNAL_EXIT"),
                         "evidence_snapshot": {},
                     }
                 )
