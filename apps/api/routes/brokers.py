@@ -10,17 +10,32 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from apps.api.core.auth import Role, require_administrator, require_operator, require_reader
+from apps.api.core.config import settings
 from services.paper_engine.adapters.credentials import (
     BrokerConnectionConfig,
     BrokerCredentialStore,
     ExecutionEnvironment,
     LIVE_TRADING_ENABLED,
+    _resolve_fernet_key,
 )
 
 router = APIRouter(prefix="/brokers", tags=["Broker Connections & Adapters"])
 
-# Shared credential store
-credential_store = BrokerCredentialStore()
+# Shared credential store using cipher derived from validated settings
+_cipher = _resolve_fernet_key(
+    key=settings.BROKER_CREDENTIAL_ENCRYPTION_KEY,
+    env=settings.ENVIRONMENT,
+)
+credential_store = BrokerCredentialStore(fernet=_cipher, env=settings.ENVIRONMENT)
+
+
+def get_credential_store() -> BrokerCredentialStore:
+    return credential_store
+
+
+def set_credential_store(store: BrokerCredentialStore) -> None:
+    global credential_store
+    credential_store = store
 
 
 class SaveConnectionRequest(BaseModel):

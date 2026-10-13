@@ -4,7 +4,8 @@ Enforces strict environment configuration, database connection parameters,
 and non-negotiable safety constraints (e.g. no live trading, mandatory validation).
 """
 
-from typing import List, Optional
+import json
+from typing import Any, Dict, List, Optional
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -22,7 +23,15 @@ PLACEHOLDER_SECRETS = {
     "secret",
     "password",
     "default_algo_lab_integrity_key",
+    "placeholder",
+    "changeme",
+    "test",
+    "admin",
+    "123456",
+    "12345678",
 }
+
+VALID_ROLES = frozenset(["reader", "researcher", "operator", "administrator"])
 
 VALID_ENVIRONMENTS = {
     "development": "development",
@@ -35,12 +44,82 @@ VALID_ENVIRONMENTS = {
 }
 
 
+def is_known_placeholder(secret: Optional[str]) -> bool:
+    """Return True if secret matches known placeholder secrets (case-insensitive)."""
+    if not secret:
+        return False
+    s = str(secret).strip().lower()
+    return s in {p.lower() for p in PLACEHOLDER_SECRETS}
+
+
 def is_invalid_secret(secret: Optional[str]) -> bool:
     """Return True if secret is empty, whitespace-only, or a known placeholder."""
     if secret is None:
         return True
     s = str(secret).strip()
-    return not s or s in PLACEHOLDER_SECRETS
+    return not s or is_known_placeholder(s)
+
+
+def validate_key_strength(key: str) -> None:
+    """Validate API key strength without leaking raw key content in exception messages."""
+    if not isinstance(key, str) or not key:
+        raise ValueError("API key must be a non-empty string.")
+    if any(c.isspace() for c in key):
+        raise ValueError("API key must not contain whitespace characters.")
+    if len(key) < 16:
+        raise ValueError("API key does not meet strength requirements: minimum length is 16 characters.")
+    if is_known_placeholder(key):
+        raise ValueError("API key cannot be a known placeholder secret.")
+
+
+def parse_and_validate_api_keys_json(raw_json: Optional[str]) -> Dict[str, str]:
+    """Parse and validate ALGO_LAB_API_KEYS_JSON.
+
+    Enforces:
+    - Valid JSON object
+    - String keys to string roles
+    - Role is one of VALID_ROLES
+    - Key strength (len >= 16, no whitespace, non-placeholder)
+    - No duplicate keys within JSON
+
+    Never prints or leaks key values in error messages.
+    """
+    if not raw_json or not str(raw_json).strip():
+        return {}
+
+    def _pairs_hook(pairs):
+        seen = {}
+        for k, v in pairs:
+            if k in seen:
+                raise ValueError("Conflicting duplicate credential detected in ALGO_LAB_API_KEYS_JSON.")
+            seen[k] = v
+        return seen
+
+    try:
+        data = json.loads(str(raw_json).strip(), object_pairs_hook=_pairs_hook)
+    except ValueError as e:
+        if "duplicate credential" in str(e).lower():
+            raise
+        raise ValueError(f"ALGO_LAB_API_KEYS_JSON is malformed JSON: {e}") from None
+
+    if not isinstance(data, dict):
+        raise ValueError("ALGO_LAB_API_KEYS_JSON must be a JSON object mapping keys to roles.")
+
+    validated: Dict[str, str] = {}
+    for k, r in data.items():
+        if not isinstance(k, str) or not isinstance(r, str):
+            raise ValueError("ALGO_LAB_API_KEYS_JSON must map string keys to string roles.")
+
+        validate_key_strength(k)
+
+        clean_role = r.strip().lower()
+        if clean_role not in VALID_ROLES:
+            raise ValueError(
+                f"Invalid role '{r}' in ALGO_LAB_API_KEYS_JSON. Permitted roles: {sorted(VALID_ROLES)}"
+            )
+        validated[k] = clean_role
+
+    return validated
 
 
 class Settings(BaseSettings):
@@ -49,6 +128,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     # Core metadata
@@ -129,8 +209,45 @@ class Settings(BaseSettings):
         return False
 
     @model_validator(mode="after")
-    def validate_production_security(self) -> "Settings":
-        """Fail closed in production if required security credentials are missing or placeholders."""
+    def validate_security_configuration(self) -> "Settings":
+        """Validate all security credentials, JSON role map, and production requirements."""
+        # 1. Reject placeholder secrets in individual configuration fields if non-empty
+        for field_name in (
+            "CIRCUIT_BREAKER_REARM_SECRET",
+            "CIRCUIT_BREAKER_STATE_KEY",
+            "BROKER_CREDENTIAL_ENCRYPTION_KEY",
+            "ALGO_LAB_API_KEY",
+            "ALGO_LAB_API_KEY_ADMIN",
+            "ALGO_LAB_API_KEY_OPERATOR",
+            "ALGO_LAB_API_KEY_RESEARCHER",
+            "ALGO_LAB_API_KEY_READER",
+        ):
+            val = getattr(self, field_name, None)
+            if val and str(val).strip():
+                if is_known_placeholder(val):
+                    raise ValueError(f"{field_name} contains a known placeholder secret.")
+
+        # 2. Parse and validate ALGO_LAB_API_KEYS_JSON
+        json_keys = parse_and_validate_api_keys_json(self.ALGO_LAB_API_KEYS_JSON)
+
+        # 3. Check for conflicting roles across credentials
+        key_to_role: Dict[str, str] = dict(json_keys)
+        env_role_assignments = [
+            ("ALGO_LAB_API_KEY_READER", "reader"),
+            ("ALGO_LAB_API_KEY_RESEARCHER", "researcher"),
+            ("ALGO_LAB_API_KEY_OPERATOR", "operator"),
+            ("ALGO_LAB_API_KEY_ADMIN", "administrator"),
+            ("ALGO_LAB_API_KEY", "administrator"),
+        ]
+        for field_name, role_name in env_role_assignments:
+            val = getattr(self, field_name, None)
+            if val and str(val).strip():
+                clean_key = str(val).strip()
+                if clean_key in key_to_role and key_to_role[clean_key] != role_name:
+                    raise ValueError("Conflicting roles configured for the same API key.")
+                key_to_role[clean_key] = role_name
+
+        # 4. Fail closed in production if required security credentials are missing or placeholders
         if self.ENVIRONMENT == "production":
             if self.ALLOW_LOCAL_AUTH_BYPASS:
                 raise ValueError(
@@ -138,23 +255,12 @@ class Settings(BaseSettings):
                     "cannot be enabled in production environment."
                 )
 
+            admin_keys = [k for k, r in key_to_role.items() if r == "administrator"]
             admin_key = self.ALGO_LAB_API_KEY or self.ALGO_LAB_API_KEY_ADMIN
-            if is_invalid_secret(admin_key):
+            if not admin_keys and is_invalid_secret(admin_key):
                 raise ValueError(
                     "Production startup failed: ALGO_LAB_API_KEY must be a strong, non-placeholder secret."
                 )
-
-            for role_key_name in (
-                "ALGO_LAB_API_KEY_ADMIN",
-                "ALGO_LAB_API_KEY_OPERATOR",
-                "ALGO_LAB_API_KEY_RESEARCHER",
-                "ALGO_LAB_API_KEY_READER",
-            ):
-                val = getattr(self, role_key_name, None)
-                if val and str(val).strip() in PLACEHOLDER_SECRETS:
-                    raise ValueError(
-                        f"Production startup failed: {role_key_name} contains a known placeholder secret."
-                    )
 
             if is_invalid_secret(self.CIRCUIT_BREAKER_REARM_SECRET):
                 raise ValueError(
@@ -170,7 +276,35 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Production startup failed: BROKER_CREDENTIAL_ENCRYPTION_KEY must be configured."
                 )
+
         return self
+
+    def export_security_settings(self) -> Dict[str, Any]:
+        """Export dictionary of validated security credentials and parameters."""
+        return {
+            "environment": self.ENVIRONMENT,
+            "rearm_secret": self.CIRCUIT_BREAKER_REARM_SECRET,
+            "state_integrity_key": self.CIRCUIT_BREAKER_STATE_KEY,
+            "broker_credential_encryption_key": self.BROKER_CREDENTIAL_ENCRYPTION_KEY,
+            "allow_local_auth_bypass": self.ALLOW_LOCAL_AUTH_BYPASS,
+            "api_keys_json": self.ALGO_LAB_API_KEYS_JSON,
+            "api_key": self.ALGO_LAB_API_KEY,
+            "api_key_admin": self.ALGO_LAB_API_KEY_ADMIN,
+            "api_key_operator": self.ALGO_LAB_API_KEY_OPERATOR,
+            "api_key_researcher": self.ALGO_LAB_API_KEY_RESEARCHER,
+            "api_key_reader": self.ALGO_LAB_API_KEY_READER,
+        }
+
+
+def export_security_settings(s: Optional[Settings] = None) -> Dict[str, Any]:
+    """Helper to export validated security settings from settings instance or singleton."""
+    target = s or settings
+    return target.export_security_settings()
+
+
+def get_security_settings(s: Optional[Settings] = None) -> Dict[str, Any]:
+    """Alias for export_security_settings."""
+    return export_security_settings(s)
 
 
 settings = Settings()

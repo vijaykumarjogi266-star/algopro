@@ -98,16 +98,16 @@ class BrokerConnectionConfig(BaseModel):
         return self.__repr__()
 
 
-def _resolve_fernet_key() -> Fernet:
-    """Resolve Fernet encryption key from environment.
+def _resolve_fernet_key(key: Optional[str] = None, env: Optional[str] = None) -> Fernet:
+    """Resolve Fernet encryption key from explicit key or environment.
 
     - Production/staging: requires BROKER_CREDENTIAL_ENCRYPTION_KEY; fails closed if absent.
     - Development: generates an ephemeral key (data won't survive restart) and logs a warning.
     """
-    raw_key = os.environ.get("BROKER_CREDENTIAL_ENCRYPTION_KEY", "").strip()
-    env = os.environ.get("ENVIRONMENT", "development").lower()
+    raw_key = (key if key is not None else os.environ.get("BROKER_CREDENTIAL_ENCRYPTION_KEY", "")).strip()
+    target_env = (env if env is not None else os.environ.get("ENVIRONMENT", "development")).lower()
     if not raw_key:
-        if env in ("production", "prod", "staging"):
+        if target_env in ("production", "prod", "staging"):
             raise RuntimeError(
                 "Production credential store requires BROKER_CREDENTIAL_ENCRYPTION_KEY "
                 "environment variable to be set. Startup aborted (fail-closed)."
@@ -135,11 +135,20 @@ class DecryptionError(RuntimeError):
 class BrokerCredentialStore:
     """Thread-safe SQLite store for broker configurations with Fernet encryption at rest."""
 
-    def __init__(self, db_path: str = ":memory:", fernet: Optional[Fernet] = None):
+    def __init__(
+        self,
+        db_path: str = ":memory:",
+        fernet: Optional[Fernet] = None,
+        encryption_key: Optional[str] = None,
+        env: Optional[str] = None,
+    ):
         self.db_path = db_path
         self._lock = threading.RLock()
         # Resolve Fernet cipher — allows injection in tests
-        self._fernet: Fernet = fernet if fernet is not None else _resolve_fernet_key()
+        if fernet is not None:
+            self._fernet = fernet
+        else:
+            self._fernet = _resolve_fernet_key(key=encryption_key, env=env)
         if db_path == ":memory:":
             self._persistent_conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._persistent_conn.row_factory = sqlite3.Row

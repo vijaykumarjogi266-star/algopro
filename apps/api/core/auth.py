@@ -128,9 +128,11 @@ def authenticate_request(
     """
     configured_keys = get_configured_key_roles()
 
-    # Allow local development/testing bypass only if explicitly enabled or key is not configured
+    # Allow local development/testing bypass only if non-production
     if not configured_keys:
-        if settings.ENVIRONMENT in ("development", "testing") or settings.ALLOW_LOCAL_AUTH_BYPASS:
+        if settings.ENVIRONMENT in ("development", "testing") or (
+            settings.ALLOW_LOCAL_AUTH_BYPASS and settings.ENVIRONMENT != "production"
+        ):
             if requested_role_header:
                 try:
                     return Role(requested_role_header.strip().lower())
@@ -147,6 +149,16 @@ def authenticate_request(
 
     # In production or when keys are configured:
     if not api_key:
+        if settings.ALLOW_LOCAL_AUTH_BYPASS and settings.ENVIRONMENT != "production":
+            if requested_role_header:
+                try:
+                    return Role(requested_role_header.strip().lower())
+                except ValueError:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Unknown role '{requested_role_header}'",
+                    )
+            return Role.ADMINISTRATOR
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="X-API-Key header required",

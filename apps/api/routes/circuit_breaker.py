@@ -17,7 +17,12 @@ def get_circuit_breaker() -> CircuitBreakerEngine:
     global _circuit_breaker
     if _circuit_breaker is None:
         state_path = getattr(settings, "CIRCUIT_BREAKER_STATE_PATH", "data/circuit_breaker_state.json")
-        _circuit_breaker = CircuitBreakerEngine(state_file_path=state_path)
+        _circuit_breaker = CircuitBreakerEngine(
+            state_file_path=state_path,
+            rearm_secret=settings.CIRCUIT_BREAKER_REARM_SECRET,
+            state_integrity_key=settings.CIRCUIT_BREAKER_STATE_KEY,
+            env=settings.ENVIRONMENT,
+        )
     return _circuit_breaker
 
 
