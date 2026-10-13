@@ -24,6 +24,9 @@ from services.market_intelligence.news_fundamental_contracts import (
     SentimentLabel,
     FundamentalSnapshot,
     HealthTier,
+    MacroNewsItem,
+    CorporateCalendarEvent,
+    AnalystConsensus,
 )
 from services.market_intelligence.sentiment_engine import FinancialSentimentAnalyzer
 
@@ -208,6 +211,24 @@ OFFLINE_NEWS_FIXTURES: Dict[str, List[Dict[str, str]]] = {
 }
 
 
+SYMBOL_ALIASES: Dict[str, List[str]] = {
+    "RELIANCE.NS": ["reliance", "ril", "jio"],
+    "TCS.NS": ["tcs", "tata consultancy"],
+    "INFY.NS": ["infosys", "infy"],
+    "HDFCBANK.NS": ["hdfc bank", "hdfcbank", "hdfc"],
+    "ICICIBANK.NS": ["icici bank", "icicibank", "icici"],
+    "SBIN.NS": ["state bank of india", "sbi", "sbin"],
+    "BHARTIARTL.NS": ["bharti airtel", "airtel", "bharti"],
+    "ITC.NS": ["itc"],
+}
+
+MULTI_SOURCE_FEEDS: List[Tuple[str, str]] = [
+    ("Economic Times", "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms"),
+    ("Moneycontrol", "https://www.moneycontrol.com/rss/MCtopnews.xml"),
+    ("LiveMint", "https://www.livemint.com/rss/markets"),
+]
+
+
 class NewsCollector:
     """Ingests, cleans, and scores financial news items with point-in-time provenance."""
 
@@ -225,12 +246,12 @@ class NewsCollector:
     def fetch_symbol_news(
         self,
         symbol: str,
-        limit: int = 10,
+        limit: int = 15,
         as_of_time: Optional[datetime] = None,
     ) -> List[NewsItem]:
         """
-        Fetches news items for a given equity symbol.
-        Uses live RSS feed if online, falling back gracefully to deterministic fixtures.
+        Fetches news items for a given equity symbol across multiple sources:
+        Google News, Economic Times, Moneycontrol, and LiveMint.
         Strictly enforces INV-26 (published_at <= as_of_time).
         """
         ref_time = as_of_time or datetime.now(timezone.utc)
@@ -259,15 +280,43 @@ class NewsCollector:
         limit: int,
         ref_time: datetime,
     ) -> List[NewsItem]:
+        items: List[NewsItem] = []
+        seen_titles = set()
+        aliases = [a.lower() for a in SYMBOL_ALIASES.get(symbol, [sym_clean.lower()])]
+
+        # 1. Primary Source: Targeted Google News search for symbol
         query = urllib.parse.quote(f"{sym_clean} share price NSE")
         url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        self._scrape_feed(url, "Google News (India)", symbol, ref_time, items, seen_titles, limit, match_aliases=None)
 
-        items: List[NewsItem] = []
-        with urllib.request.urlopen(req, timeout=4.0) as resp:
+        # 2. Secondary Sources: Financial Press Feeds (Economic Times, Moneycontrol, LiveMint)
+        if len(items) < limit:
+            for source_name, feed_url in MULTI_SOURCE_FEEDS:
+                try:
+                    self._scrape_feed(feed_url, source_name, symbol, ref_time, items, seen_titles, limit, match_aliases=aliases)
+                    if len(items) >= limit:
+                        break
+                except Exception as e:
+                    logger.debug(f"Feed error on {source_name}: {e}")
+
+        return items
+
+    def _scrape_feed(
+        self,
+        url: str,
+        source_label: str,
+        symbol: str,
+        ref_time: datetime,
+        items: List[NewsItem],
+        seen_titles: set,
+        limit: int,
+        match_aliases: Optional[List[str]] = None,
+    ):
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
             content = resp.read()
             root = ET.fromstring(content)
-            for item_elem in root.findall(".//item")[:limit * 2]:
+            for item_elem in root.findall(".//item"):
                 title_elem = item_elem.find("title")
                 pub_elem = item_elem.find("pubDate")
                 link_elem = item_elem.find("link")
@@ -277,18 +326,24 @@ class NewsCollector:
                     continue
 
                 title = title_elem.text.strip()
+                t_lower = title.lower()
+
+                # If alias filtering is active, only include headlines mentioning the company
+                if match_aliases and not any(re.search(rf"\b{re.escape(alias)}\b", t_lower) for alias in match_aliases):
+                    continue
+
+                if t_lower in seen_titles:
+                    continue
+                seen_titles.add(t_lower)
+
                 link = link_elem.text.strip() if link_elem is not None and link_elem.text else None
-                source = source_elem.text.strip() if source_elem is not None and source_elem.text else "Financial Press"
+                source = source_elem.text.strip() if source_elem is not None and source_elem.text else source_label
 
-                # Parse publication time (RFC 822 / 2822)
                 pub_dt = self._parse_pub_date(pub_elem.text if pub_elem is not None else None, ref_time)
-
-                # Skip future news (Strict Lookahead Protection INV-26)
                 if pub_dt > ref_time:
                     continue
 
                 article_id = hashlib.sha256(f"{symbol}_{title}_{pub_dt.isoformat()}".encode("utf-8")).hexdigest()[:16]
-
                 score, label, conf, cat, urg = self.sentiment_analyzer.analyze_text(title)
 
                 items.append(NewsItem(
@@ -310,7 +365,92 @@ class NewsCollector:
                 if len(items) >= limit:
                     break
 
-        return items
+    def fetch_macro_news(
+        self,
+        limit: int = 15,
+        as_of_time: Optional[datetime] = None,
+    ) -> List[MacroNewsItem]:
+        """Fetches broader macroeconomic news (RBI, inflation, bond yields, Nifty sentiment)."""
+        ref_time = as_of_time or datetime.now(timezone.utc)
+        macro_items: List[MacroNewsItem] = []
+        seen = set()
+
+        if not self.force_offline:
+            try:
+                query = urllib.parse.quote("RBI repo rate inflation monetary policy Indian economy Nifty")
+                url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=4.0) as resp:
+                    root = ET.fromstring(resp.read())
+                    for item_elem in root.findall(".//item")[:limit * 2]:
+                        title_elem = item_elem.find("title")
+                        pub_elem = item_elem.find("pubDate")
+                        link_elem = item_elem.find("link")
+                        source_elem = item_elem.find("source")
+
+                        if title_elem is None or not title_elem.text:
+                            continue
+                        title = title_elem.text.strip()
+                        if title.lower() in seen:
+                            continue
+                        seen.add(title.lower())
+
+                        pub_dt = self._parse_pub_date(pub_elem.text if pub_elem is not None else None, ref_time)
+                        if pub_dt > ref_time:
+                            continue
+
+                        item_id = hashlib.sha256(f"MACRO_{title}_{pub_dt.isoformat()}".encode("utf-8")).hexdigest()[:16]
+                        score, _, _, _, _ = self.sentiment_analyzer.analyze_text(title)
+
+                        # Determine macro theme
+                        t_lower = title.lower()
+                        if any(w in t_lower for w in ["rbi", "repo", "monetary policy", "interest rate"]):
+                            theme = "MONETARY_POLICY"
+                        elif any(w in t_lower for w in ["inflation", "cpi", "wpi", "price rise"]):
+                            theme = "INFLATION"
+                        elif any(w in t_lower for w in ["fii", "dii", "foreign flow", "outflow"]):
+                            theme = "FII_FLOWS"
+                        else:
+                            theme = "MACRO_GROWTH"
+
+                        source = source_elem.text.strip() if source_elem is not None and source_elem.text else "Financial Press"
+                        link = link_elem.text.strip() if link_elem is not None and link_elem.text else None
+
+                        macro_items.append(MacroNewsItem(
+                            item_id=item_id,
+                            headline=title,
+                            source=source,
+                            published_at=pub_dt,
+                            sentiment_score=score,
+                            theme=theme,
+                            url=link,
+                        ))
+                        if len(macro_items) >= limit:
+                            break
+            except Exception as e:
+                logger.warning(f"Live macro news fetch failed: {e}")
+
+        if not macro_items:
+            # Deterministic offline macro fixtures
+            defaults = [
+                ("RBI leaves repo rate unchanged at 6.50% citing resilient domestic economic expansion", "LiveMint", "MONETARY_POLICY", 0.4),
+                ("India CPI inflation remains within tolerance band as food prices stabilize", "Economic Times", "INFLATION", 0.35),
+                ("FII inflows accelerate into domestic large-cap equities amid strong economic outlook", "Moneycontrol", "FII_FLOWS", 0.6),
+            ]
+            for i, (head, src, th, sc) in enumerate(defaults):
+                dt = ref_time - timedelta(hours=i * 3 + 1)
+                macro_items.append(MacroNewsItem(
+                    item_id=f"MACRO_OFFLINE_{i}",
+                    headline=head,
+                    source=src,
+                    published_at=dt,
+                    sentiment_score=sc,
+                    theme=th,
+                ))
+
+        macro_items.sort(key=lambda x: x.published_at, reverse=True)
+        return macro_items[:limit]
+
 
     def _fetch_offline_fixtures(self, symbol: str, sym_clean: str, ref_time: datetime) -> List[NewsItem]:
         raw_list = OFFLINE_NEWS_FIXTURES.get(symbol, [
@@ -489,3 +629,75 @@ class FundamentalCollector:
             health_tier=fix["health_tier"],
             red_flags=list(fix["red_flags"]),
         )
+
+    def fetch_corporate_calendar(self, symbol: str) -> List[CorporateCalendarEvent]:
+        """Fetches upcoming earnings release dates and corporate events."""
+        events: List[CorporateCalendarEvent] = []
+        if self.force_offline:
+            return events
+        try:
+            ticker = yf.Ticker(symbol)
+            cal = ticker.calendar
+            if isinstance(cal, dict):
+                for k, v in cal.items():
+                    val_str = str(v) if v is not None else ""
+                    events.append(CorporateCalendarEvent(
+                        symbol=symbol,
+                        event_type="CALENDAR_EVENT",
+                        event_date=val_str,
+                        description=f"{k}: {val_str}",
+                    ))
+        except Exception as e:
+            logger.debug(f"Calendar fetch failed for {symbol}: {e}")
+        return events
+
+    def fetch_analyst_consensus(self, symbol: str) -> AnalystConsensus:
+        """Fetches Wall Street & institutional analyst target prices and consensus recommendations."""
+        if self.force_offline:
+            return AnalystConsensus(
+                symbol=symbol,
+                target_mean=None,
+                target_high=None,
+                target_low=None,
+                current_price=None,
+                upside_potential_pct=None,
+                recommendation_key="none",
+                number_of_analysts=None,
+            )
+        try:
+            ticker = yf.Ticker(symbol)
+            info = ticker.info or {}
+            target_mean = info.get("targetMeanPrice")
+            target_high = info.get("targetHighPrice")
+            target_low = info.get("targetLowPrice")
+            current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+            rec_key = info.get("recommendationKey", "hold")
+            num_analysts = info.get("numberOfAnalystOpinions")
+
+            upside = None
+            if target_mean and current_price and current_price > 0:
+                upside = round(((target_mean - current_price) / current_price) * 100.0, 1)
+
+            return AnalystConsensus(
+                symbol=symbol,
+                target_mean=float(target_mean) if target_mean else None,
+                target_high=float(target_high) if target_high else None,
+                target_low=float(target_low) if target_low else None,
+                current_price=float(current_price) if current_price else None,
+                upside_potential_pct=upside,
+                recommendation_key=str(rec_key),
+                number_of_analysts=int(num_analysts) if num_analysts else None,
+            )
+        except Exception as e:
+            logger.debug(f"Analyst consensus fetch failed for {symbol}: {e}")
+            return AnalystConsensus(
+                symbol=symbol,
+                target_mean=None,
+                target_high=None,
+                target_low=None,
+                current_price=None,
+                upside_potential_pct=None,
+                recommendation_key="unknown",
+                number_of_analysts=None,
+            )
+

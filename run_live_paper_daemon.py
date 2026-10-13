@@ -197,6 +197,9 @@ def main():
         initial_capital=BUYING_POWER,
     )
 
+    from services.market_intelligence.stock_decision_engine import StockDecisionEngine
+    stock_decision_engine = StockDecisionEngine()
+
     cycle = 0
     trade_targets = {}  # {symbol: target_price}
     trade_stops = {}    # {symbol: stop_loss}
@@ -319,11 +322,27 @@ def main():
             market_prices[sym] = price
             sym_key = sym.upper()
 
-            # Manage active positions (SL / TP)
+            # Manage active positions (SL / TP / Emergency Exit)
             current_pos = session.portfolio.positions.get(sym_key)
             if current_pos and current_pos.quantity > 0:
                 current_sl = trade_stops.get(sym_key, current_pos.average_entry_price * 0.98)
                 current_tp = trade_targets.get(sym_key, current_pos.average_entry_price * 1.03)
+
+                # Emergency holding risk check (breaking scandal/probe)
+                holding_risk = stock_decision_engine.evaluate_holding_risk(sym, current_pos.average_entry_price, price)
+                if holding_risk.action.value == "EMERGENCY_EXIT":
+                    log_msg(f"[EMERGENCY EXIT] {sym}: {holding_risk.reason}")
+                    order, fill = paper_engine.submit_manual_order(
+                        session_id=session.session_id,
+                        symbol=sym,
+                        side=OrderSide.SELL,
+                        quantity=current_pos.quantity,
+                        price=price,
+                    )
+                    session = paper_engine.get_session(session.session_id)
+                    trade_stops.pop(sym_key, None)
+                    trade_targets.pop(sym_key, None)
+                    continue
 
                 if data["low"] <= current_sl:
                     log_msg(f"[EXIT TRIGGER] {sym} hit STOP LOSS @ {current_sl:.2f} (Entry: {current_pos.average_entry_price:.2f})")
@@ -365,11 +384,22 @@ def main():
                     log_msg(f"[SIGNAL IGNORED] {sym}: Max open positions ({risk_limits.max_open_positions}) reached.")
                     continue
 
+                # Quantamental decision & trade gating
+                trade_decision = stock_decision_engine.evaluate_entry_decision(sym, data["signal"], price)
+                if trade_decision.action.value == "VETO":
+                    log_msg(f"[QUANTAMENTAL VETO] {sym}: {trade_decision.reason}")
+                    continue
+                elif trade_decision.action.value == "WAIT":
+                    log_msg(f"[QUANTAMENTAL WAIT] {sym}: {trade_decision.reason}")
+                    continue
+
                 risk_per_trade = INITIAL_CAPITAL * 0.05
                 stop_dist = max(price - data["stop_loss"], data["atr"])
                 shares = int(risk_per_trade / stop_dist)
                 max_shares = int((BUYING_POWER * 0.20) / price)
                 shares = max(1, min(shares, max_shares))
+                # Scale proposed shares by quantamental conviction
+                shares = max(1, int(shares * trade_decision.approved_quantity_scale))
 
                 eval_res = risk_engine.evaluate(
                     symbol=sym,
@@ -382,6 +412,7 @@ def main():
                     current_open_positions_count=len(session.portfolio.positions),
                     context={"historical_returns": data["historical_returns"]}
                 )
+
 
                 if eval_res.is_approved:
                     order, fill = paper_engine.submit_manual_order(

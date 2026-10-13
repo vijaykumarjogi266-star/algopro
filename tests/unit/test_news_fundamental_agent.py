@@ -248,3 +248,354 @@ class TestNewsFundamentalAgent:
         assert "Quantamental Leaderboard" in report
         assert "RELIANCE.NS" in report
         assert "TCS.NS" in report
+
+
+class TestMarketIntelligenceAssistant:
+    def test_assistant_scheduled_cycle_and_tiers(self, temp_intel_env):
+        from services.market_intelligence.assistant_engine import MarketIntelligenceAssistant
+        from services.market_intelligence.news_fundamental_contracts import CollectionScheduleConfig
+
+        config = CollectionScheduleConfig(
+            news_interval_minutes=1,
+            macro_interval_minutes=1,
+            fundamentals_interval_hours=1,
+        )
+        assistant = MarketIntelligenceAssistant(
+            db_path=temp_intel_env["db_path"],
+            intelligence_dir=temp_intel_env["intel_dir"],
+            schedule_config=config,
+            force_offline=True,
+        )
+
+        res = assistant.run_scheduled_cycle(["RELIANCE.NS", "TCS.NS"])
+        assert "NEWS_STREAM" in res["tiers_executed"]
+        assert "MACRO_WATCH" in res["tiers_executed"]
+        assert "FUNDAMENTALS_DEEP" in res["tiers_executed"]
+        assert res["fundamentals_updated"] == 2
+
+        status = assistant.get_status()
+        assert status["total_macro_items"] > 0
+        assert status["total_news_articles"] > 0
+        assert "NEWS_STREAM" in status["schedule_tiers"]
+
+    def test_assistant_conversational_queries(self, temp_intel_env):
+        from services.market_intelligence.assistant_engine import MarketIntelligenceAssistant
+
+        assistant = MarketIntelligenceAssistant(
+            db_path=temp_intel_env["db_path"],
+            intelligence_dir=temp_intel_env["intel_dir"],
+            force_offline=True,
+        )
+
+        # Briefing query
+        brief = assistant.ask("give me the market briefing")
+        assert "Macroeconomic & Policy Pulse" in brief
+        assert "Top Quantamental Leaderboard" in brief
+
+        # Single stock query
+        dossier = assistant.ask("What is the outlook on TCS?")
+        assert "TCS.NS" in dossier
+        assert "Explainability:" in dossier
+
+        # Head-to-head comparison query
+        comp = assistant.ask("Compare TCS and Reliance")
+        assert "Comparative Quantamental Analysis" in comp
+        assert "TCS.NS" in comp
+        assert "RELIANCE.NS" in comp
+
+        # Breaking alerts query
+        alerts_resp = assistant.ask("Are there any breaking alerts?")
+        assert isinstance(alerts_resp, str)
+
+
+class TestStockDecisionEngine:
+    def test_run_stock_selection(self, temp_intel_env):
+        from services.market_intelligence.news_fundamental_agent import NewsFundamentalAgent
+        from services.market_intelligence.stock_decision_engine import (
+            StockDecisionEngine,
+            StockSelectionManifest,
+            SelectionTier,
+        )
+
+        agent = NewsFundamentalAgent(
+            db_path=temp_intel_env["db_path"],
+            intelligence_dir=temp_intel_env["intel_dir"],
+            force_offline=True,
+        )
+        engine = StockDecisionEngine(agent=agent, max_portfolio_size=3)
+
+        manifest = engine.run_stock_selection(["TCS.NS", "RELIANCE.NS", "ITC.NS"])
+        assert isinstance(manifest, StockSelectionManifest)
+        assert len(manifest.selected_portfolio) <= 3
+        assert "TCS.NS" in manifest.selected_portfolio
+        assert "TCS.NS" in manifest.top_picks
+        assert "Screened 3 symbols" in manifest.narrative
+
+    def test_stock_selection_database_persistence(self, temp_intel_env):
+        import sqlite3
+        from services.market_intelligence.news_fundamental_agent import NewsFundamentalAgent
+        from services.market_intelligence.stock_decision_engine import StockDecisionEngine
+
+        agent = NewsFundamentalAgent(
+            db_path=temp_intel_env["db_path"],
+            intelligence_dir=temp_intel_env["intel_dir"],
+            force_offline=True,
+        )
+        engine = StockDecisionEngine(agent=agent, max_portfolio_size=3)
+
+        manifest = engine.run_stock_selection(["TCS.NS", "RELIANCE.NS", "ITC.NS"])
+
+        # Check SQLite persistence in stock_selections table
+        with sqlite3.connect(temp_intel_env["db_path"]) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT selection_id, candidate_count, top_picks FROM stock_selections")
+            sel_row = cur.fetchone()
+            assert sel_row is not None
+            assert sel_row[1] == 3
+            assert "TCS.NS" in sel_row[2]
+
+            # Check SQLite persistence in stock_selection_candidates table
+            cur.execute("SELECT symbol, rank, tier, is_eligible_for_trading FROM stock_selection_candidates ORDER BY rank ASC")
+            cand_rows = cur.fetchall()
+            assert len(cand_rows) == 3
+            assert cand_rows[0][0] == "TCS.NS"
+            assert cand_rows[0][1] == 1
+            assert cand_rows[0][3] == 1
+
+        # Check retrieval methods
+        latest = engine.get_latest_stock_selection()
+        assert latest is not None
+        assert latest["candidate_count"] == 3
+        assert len(latest["candidates"]) == 3
+        assert latest["candidates"][0]["symbol"] == "TCS.NS"
+
+        recent = engine.get_recent_stock_selections(limit=5)
+        assert len(recent) == 1
+        assert recent[0]["selection_id"] == latest["selection_id"]
+
+    def test_evaluate_entry_decision_approval_and_veto(self, temp_intel_env):
+        from services.market_intelligence.news_fundamental_agent import NewsFundamentalAgent
+        from services.market_intelligence.stock_decision_engine import (
+            StockDecisionEngine,
+            TradeAction,
+        )
+
+        agent = NewsFundamentalAgent(
+            db_path=temp_intel_env["db_path"],
+            intelligence_dir=temp_intel_env["intel_dir"],
+            force_offline=True,
+        )
+        engine = StockDecisionEngine(agent=agent)
+
+        # High quality stock with technical BUY signal -> APPROVE_BUY
+        res_tcs = engine.evaluate_entry_decision("TCS.NS", "BUY", 2200.0)
+        assert res_tcs.action == TradeAction.APPROVE_BUY
+        assert res_tcs.approved_quantity_scale > 0.5
+        assert "High Conviction" in res_tcs.reason or "Approved" in res_tcs.reason
+
+        # Technical signal is WAIT -> WAIT
+        res_wait = engine.evaluate_entry_decision("TCS.NS", "WAIT", 2200.0)
+        assert res_wait.action == TradeAction.WAIT
+        assert res_wait.approved_quantity_scale == 0.0
+
+    def test_trade_decision_database_persistence(self, temp_intel_env):
+        import sqlite3
+        from services.market_intelligence.news_fundamental_agent import NewsFundamentalAgent
+        from services.market_intelligence.stock_decision_engine import (
+            StockDecisionEngine,
+            TradeAction,
+        )
+
+        agent = NewsFundamentalAgent(
+            db_path=temp_intel_env["db_path"],
+            intelligence_dir=temp_intel_env["intel_dir"],
+            force_offline=True,
+        )
+        engine = StockDecisionEngine(agent=agent)
+
+        # 1. Run entry evaluation
+        res1 = engine.evaluate_entry_decision("TCS.NS", "BUY", 2200.0)
+        res2 = engine.evaluate_entry_decision("INFY.NS", "WAIT", 1500.0)
+
+        # 2. Check persistence in trade_decisions table
+        with sqlite3.connect(temp_intel_env["db_path"]) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT symbol, action, approved_quantity_scale, decision_type FROM trade_decisions ORDER BY evaluated_at ASC")
+            rows = cur.fetchall()
+            assert len(rows) == 2
+            assert rows[0][0] == "TCS.NS"
+            assert rows[0][1] == "APPROVE_BUY"
+            assert rows[0][2] > 0.5
+            assert rows[0][3] == "ENTRY_EVALUATION"
+
+            assert rows[1][0] == "INFY.NS"
+            assert rows[1][1] == "WAIT"
+
+        # 3. Test query retrieval methods
+        decisions = engine.get_recent_trade_decisions(limit=10)
+        assert len(decisions) == 2
+        tcs_decisions = engine.get_recent_trade_decisions(symbol="TCS.NS")
+        assert len(tcs_decisions) == 1
+        assert tcs_decisions[0]["action"] == "APPROVE_BUY"
+
+    def test_emergency_exit_evaluation(self, temp_intel_env):
+        from services.market_intelligence.news_fundamental_agent import NewsFundamentalAgent
+        from services.market_intelligence.stock_decision_engine import (
+            StockDecisionEngine,
+            TradeAction,
+        )
+
+        agent = NewsFundamentalAgent(
+            db_path=temp_intel_env["db_path"],
+            intelligence_dir=temp_intel_env["intel_dir"],
+            force_offline=True,
+        )
+        engine = StockDecisionEngine(agent=agent)
+
+        # Normal holding with clean news
+        holding_ok = engine.evaluate_holding_risk("TCS.NS", 2150.0, 2200.0)
+        assert holding_ok.action == TradeAction.WAIT
+        assert holding_ok.red_flag_alert is False
+
+        # Verify emergency exit check persisted to SQLite
+        decisions = engine.get_recent_trade_decisions(symbol="TCS.NS")
+        assert len(decisions) == 1
+        assert decisions[0]["decision_type"] == "HOLDING_RISK"
+
+    def test_assistant_database_retrieval_and_telemetry(self, temp_intel_env):
+        from services.market_intelligence.assistant_engine import MarketIntelligenceAssistant
+
+        assistant = MarketIntelligenceAssistant(
+            db_path=temp_intel_env["db_path"],
+            intelligence_dir=temp_intel_env["intel_dir"],
+            force_offline=True,
+        )
+
+        # Initially empty selections
+        sel_empty = assistant.get_latest_stock_selection()
+        assert sel_empty is None
+
+        # Run stock selection
+        manifest = assistant.decision_engine.run_stock_selection(["TCS.NS", "RELIANCE.NS"])
+        assert manifest is not None
+
+        # Check retrieval via assistant
+        sel_latest = assistant.get_latest_stock_selection()
+        assert sel_latest is not None
+        assert "TCS.NS" in sel_latest["top_picks"]
+
+        # Evaluate trade decision
+        assistant.decision_engine.evaluate_entry_decision("TCS.NS", "BUY", 2200.0)
+        recent_decs = assistant.get_recent_decisions()
+        assert len(recent_decs) >= 1
+        assert recent_decs[0]["symbol"] == "TCS.NS"
+
+        # Check status contains all database counts
+        status = assistant.get_status()
+        assert status["total_stock_selections"] >= 1
+        assert status["total_selection_candidates"] >= 2
+        assert status["total_trade_decisions"] >= 1
+
+        # Check conversational queries retrieve from database
+        q_sel = assistant.ask("what was our last stock selection?")
+        assert "Latest Stock Selection Manifest" in q_sel
+        assert "TCS.NS" in q_sel
+
+        q_dec = assistant.ask("show decision history")
+        assert "Trade Decision Audit Trail" in q_dec
+        assert "TCS.NS" in q_dec
+
+    def test_eod_report_and_research_strategy_persistence(self, temp_intel_env):
+        from services.market_intelligence.assistant_engine import MarketIntelligenceAssistant
+
+        assistant = MarketIntelligenceAssistant(
+            db_path=temp_intel_env["db_path"],
+            intelligence_dir=temp_intel_env["intel_dir"],
+            force_offline=True,
+        )
+
+        # 1. Test EOD Report Persistence
+        eod_payload = {
+            "report_date": "2026-10-13",
+            "generated_at": "2026-10-13T10:45:00+00:00",
+            "session_id": "sess_test_123",
+            "starting_capital": 50000.0,
+            "ending_equity": 50667.17,
+            "gross_pnl": 766.56,
+            "net_pnl": 734.26,
+            "total_trades": 6,
+            "winning_trades": 6,
+            "losing_trades": 0,
+            "win_rate_pct": 100.0,
+            "profit_factor": 999.0,
+            "max_drawdown_pct": 0.0043,
+            "reconciliation_status": "MATCH",
+            "variance": 0.0,
+            "market_regime": "TRENDING_BEAR",
+            "selected_strategy": "STRAT_BOLLINGER_REVERSION",
+            "risk_multiplier": 1.0,
+            "top_stock_picks": ["TCS.NS", "INFY.NS"],
+            "executive_summary": "Net PnL +734.26 (100% win rate)",
+            "report_markdown": "# Algo Lab — EOD Audit Report 2026-10-13\nNet P&L: +₹734.26",
+            "metrics_json": {"brokerage": 67.09},
+        }
+
+        saved_date = assistant.save_eod_report(eod_payload)
+        assert saved_date == "2026-10-13"
+
+        # Retrieve EOD Report
+        eod = assistant.get_eod_report("2026-10-13")
+        assert eod is not None
+        assert eod["reconciliation_status"] == "MATCH"
+        assert eod["net_pnl"] == 734.26
+        assert eod["win_rate_pct"] == 100.0
+        assert "# Algo Lab — EOD Audit Report 2026-10-13" in eod["report_markdown"]
+
+        recent_eods = assistant.get_recent_eod_reports()
+        assert len(recent_eods) == 1
+        assert recent_eods[0]["report_date"] == "2026-10-13"
+
+        # 2. Test Strategy Research Decision Persistence
+        decision_payload = {
+            "decision_date": "2026-10-13T10:10:39+00:00",
+            "target_session_date": "2026-10-14",
+            "market_regime": "TRENDING_BEAR",
+            "selected_strategy": "STRAT_BOLLINGER_REVERSION",
+            "risk_multiplier": 1.0,
+            "allocation_reason": "DSR=1.00 compatible with TRENDING_BEAR",
+            "candidate_evaluations": [
+                {
+                    "strategy": "STRAT_BOLLINGER_REVERSION",
+                    "trades_count": 39,
+                    "win_rate_pct": 61.5,
+                    "profit_factor": 1.62,
+                    "sharpe_ratio": 7.77,
+                    "dsr": 1.0,
+                    "is_robust": True,
+                }
+            ],
+            "eod_audit": {"realized_pnl": 734.26},
+        }
+
+        saved_dec_date = assistant.save_research_strategy_decision(decision_payload)
+        assert saved_dec_date == "2026-10-13"
+
+        strat = assistant.get_latest_research_strategy_decision()
+        assert strat is not None
+        assert strat["selected_strategy"] == "STRAT_BOLLINGER_REVERSION"
+        assert len(strat["candidate_evaluations"]) == 1
+
+        # 3. Test Conversational Queries on EOD and Research
+        q_eod = assistant.ask("show today's eod report")
+        assert "# Algo Lab — EOD Audit Report 2026-10-13" in q_eod
+
+        q_strat = assistant.ask("what is the strategy decision for tomorrow?")
+        assert "Autonomous Strategy Research Decision" in q_strat
+        assert "STRAT_BOLLINGER_REVERSION" in q_strat
+
+        # 4. Telemetry check
+        st = assistant.get_status()
+        assert st["total_eod_reports"] == 1
+        assert st["total_research_strategy_decisions"] == 1
+
+

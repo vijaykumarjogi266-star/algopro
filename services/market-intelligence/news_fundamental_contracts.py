@@ -122,3 +122,46 @@ class QuantamentalDecisionManifest:
     catalysts: List[str]
     risks: List[str]
     narrative: str                       # Explainable audit narrative
+
+
+@dataclass(frozen=True)
+class MacroNewsItem:
+    """Broader macroeconomic news event (RBI, inflation, GDP, FII, currency)."""
+    item_id: str
+    headline: str
+    source: str
+    published_at: datetime
+    sentiment_score: float
+    theme: str                           # "MONETARY_POLICY", "INFLATION", "FII_FLOWS", "MACRO_GROWTH"
+    url: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class CorporateCalendarEvent:
+    """Upcoming or recent corporate catalyst (earnings release, dividend ex-date)."""
+    symbol: str
+    event_type: str                      # "EARNINGS", "DIVIDEND", "SPLIT"
+    event_date: Optional[str]
+    description: str
+
+
+@dataclass(frozen=True)
+class AnalystConsensus:
+    """Institutional analyst ratings, target price dispersion, and recommendations."""
+    symbol: str
+    target_mean: Optional[float]
+    target_high: Optional[float]
+    target_low: Optional[float]
+    current_price: Optional[float]
+    upside_potential_pct: Optional[float]
+    recommendation_key: str              # e.g. "buy", "hold", "outperform"
+    number_of_analysts: Optional[int]
+
+
+@dataclass
+class CollectionScheduleConfig:
+    """Configurable collection intervals across multi-tiered intelligence sources."""
+    news_interval_minutes: int = 15      # Intraday breaking news stream
+    macro_interval_minutes: int = 60     # Macroeconomic & market wrap news
+    fundamentals_interval_hours: int = 12 # Deep fundamental balance sheet & analyst refresh
+
