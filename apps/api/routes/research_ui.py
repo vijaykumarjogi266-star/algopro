@@ -1015,6 +1015,16 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
     let currentRunId = null;
     let pollInterval = null;
 
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     function switchView(viewName) {
       document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.view-section').forEach(s => s.classList.remove('active'));
@@ -1044,7 +1054,7 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
           const prevBase = baseSelect.value;
           const prevTgt = tgtSelect.value;
           const optsHtml = '<option value="">-- Select Experiment --</option>' +
-            exps.map(e => `<option value="${e.experiment_id}">${e.name} (${e.experiment_id})</option>`).join('');
+            exps.map(e => `<option value="${escapeHtml(e.experiment_id)}">${escapeHtml(e.name)} (${escapeHtml(e.experiment_id)})</option>`).join('');
           baseSelect.innerHTML = optsHtml;
           tgtSelect.innerHTML = optsHtml;
           if (prevBase) baseSelect.value = prevBase;
@@ -1056,7 +1066,7 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         if (auditSelect) {
           const prevAudit = auditSelect.value;
           auditSelect.innerHTML = '<option value="">-- Select Experiment --</option>' +
-            exps.map(e => `<option value="${e.experiment_id}">${e.name} (${e.experiment_id})</option>`).join('');
+            exps.map(e => `<option value="${escapeHtml(e.experiment_id)}">${escapeHtml(e.name)} (${escapeHtml(e.experiment_id)})</option>`).join('');
           if (prevAudit) auditSelect.value = prevAudit;
         }
 
@@ -1077,20 +1087,28 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
 
           tbody.innerHTML = exps.map(e => `
             <tr>
-              <td class="mono"><strong>${e.experiment_id}</strong></td>
-              <td>${e.name}</td>
-              <td>${e.strategy_id} v${e.strategy_version}</td>
-              <td>${e.dataset_id}</td>
-              <td><span class="badge badge-${e.status.toLowerCase()}">${e.status}</span></td>
-              <td class="mono" style="font-size: 0.75rem;">${e.fingerprint.substring(0, 12)}...</td>
+              <td class="mono"><strong>${escapeHtml(e.experiment_id)}</strong></td>
+              <td>${escapeHtml(e.name)}</td>
+              <td>${escapeHtml(e.strategy_id)} v${escapeHtml(e.strategy_version)}</td>
+              <td>${escapeHtml(e.dataset_id)}</td>
+              <td><span class="badge badge-${escapeHtml(e.status.toLowerCase())}">${escapeHtml(e.status)}</span></td>
+              <td class="mono" style="font-size: 0.75rem;">${escapeHtml((e.fingerprint || '').substring(0, 12))}...</td>
               <td>${new Date(e.created_at).toLocaleString()}</td>
               <td>
-                <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" onclick="openExperimentDetail('${e.experiment_id}')">
+                <button class="btn btn-secondary btn-inspect-exp" style="padding: 4px 8px; font-size: 0.75rem;" data-exp-id="${escapeHtml(e.experiment_id)}">
                   Inspect
                 </button>
               </td>
             </tr>
           `).join('');
+
+          tbody.onclick = (ev) => {
+            const btn = ev.target.closest('.btn-inspect-exp');
+            if (btn) {
+              const expId = btn.getAttribute('data-exp-id');
+              openExperimentDetail(expId);
+            }
+          };
         }
       } catch (err) {
         console.error('Failed to load dashboard:', err);
@@ -1408,9 +1426,9 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         } else {
           paramsTbody.innerHTML = paramEntries.map(([k, p]) => `
             <tr>
-              <td class="mono"><strong>${k}</strong></td>
-              <td class="mono">${JSON.stringify(p.baseline_value)}</td>
-              <td class="mono">${JSON.stringify(p.target_value)}</td>
+              <td class="mono"><strong>${escapeHtml(k)}</strong></td>
+              <td class="mono">${escapeHtml(JSON.stringify(p.baseline_value))}</td>
+              <td class="mono">${escapeHtml(JSON.stringify(p.target_value))}</td>
               <td>
                 ${p.is_different 
                   ? '<span class="badge badge-pending">CHANGED</span>' 
@@ -1435,11 +1453,11 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
             }
             return `
               <tr>
-                <td><strong>${m.metric_name}</strong></td>
-                <td class="mono">${m.baseline_value !== null ? m.baseline_value : '<span style="color: var(--text-muted);">N/A</span>'}</td>
-                <td class="mono">${m.target_value !== null ? m.target_value : '<span style="color: var(--text-muted);">N/A</span>'}</td>
-                <td class="mono">${deltaStr}</td>
-                <td class="mono">${deltaPctStr}</td>
+                <td><strong>${escapeHtml(m.metric_name)}</strong></td>
+                <td class="mono">${m.baseline_value !== null ? escapeHtml(m.baseline_value) : '<span style="color: var(--text-muted);">N/A</span>'}</td>
+                <td class="mono">${m.target_value !== null ? escapeHtml(m.target_value) : '<span style="color: var(--text-muted);">N/A</span>'}</td>
+                <td class="mono">${escapeHtml(deltaStr)}</td>
+                <td class="mono">${escapeHtml(deltaPctStr)}</td>
               </tr>
             `;
           }).join('');
@@ -1550,22 +1568,31 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         }
         tbody.innerHTML = sessions.map(s => `
           <tr>
-            <td style="font-family: var(--font-mono);">${s.session_id}</td>
-            <td><strong>${s.name}</strong></td>
-            <td>${s.strategy_id}</td>
-            <td>${s.universe.join(', ')}</td>
-            <td><span class="badge badge-${s.status.toLowerCase()}">${s.status}</span></td>
-            <td>₹${s.initial_capital.toLocaleString()}</td>
-            <td><strong>₹${(s.portfolio.cash + (s.portfolio.positions ? Object.values(s.portfolio.positions).reduce((a,b)=>a+b.market_value,0):0)).toLocaleString()}</strong></td>
-            <td style="color: ${s.portfolio.total_realized_pnl >= 0 ? 'var(--success)' : 'var(--danger)'}">₹${s.portfolio.total_realized_pnl.toFixed(2)}</td>
-            <td style="color: ${s.portfolio.total_unrealized_pnl >= 0 ? 'var(--success)' : 'var(--danger)'}">₹${s.portfolio.total_unrealized_pnl.toFixed(2)}</td>
+            <td style="font-family: var(--font-mono);">${escapeHtml(s.session_id)}</td>
+            <td><strong>${escapeHtml(s.name)}</strong></td>
+            <td>${escapeHtml(s.strategy_id)}</td>
+            <td>${escapeHtml((s.universe || []).join(', '))}</td>
+            <td><span class="badge badge-${escapeHtml((s.status || '').toLowerCase())}">${escapeHtml(s.status)}</span></td>
+            <td>₹${s.initial_capital ? s.initial_capital.toLocaleString() : '0'}</td>
+            <td><strong>₹${(s.portfolio && s.portfolio.cash ? (s.portfolio.cash + (s.portfolio.positions ? Object.values(s.portfolio.positions).reduce((a,b)=>a+b.market_value,0):0)) : 0).toLocaleString()}</strong></td>
+            <td style="color: ${(s.portfolio && s.portfolio.total_realized_pnl >= 0) ? 'var(--success)' : 'var(--danger)'}">₹${(s.portfolio && s.portfolio.total_realized_pnl !== undefined) ? s.portfolio.total_realized_pnl.toFixed(2) : '0.00'}</td>
+            <td style="color: ${(s.portfolio && s.portfolio.total_unrealized_pnl >= 0) ? 'var(--success)' : 'var(--danger)'}">₹${(s.portfolio && s.portfolio.total_unrealized_pnl !== undefined) ? s.portfolio.total_unrealized_pnl.toFixed(2) : '0.00'}</td>
             <td>
-              <button class="btn btn-sm" onclick="viewPaperSession('${s.session_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--card-border); color: var(--text); border:none; border-radius: 4px; cursor:pointer;">View</button>
-              ${s.status === 'CREATED' || s.status === 'PAUSED' ? `<button class="btn btn-sm" onclick="startPaperSession('${s.session_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--success); color: #fff; border:none; border-radius: 4px; cursor:pointer;">Start</button>` : ''}
-              ${s.status === 'RUNNING' ? `<button class="btn btn-sm" onclick="stopPaperSession('${s.session_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--danger); color: #fff; border:none; border-radius: 4px; cursor:pointer;">Stop</button>` : ''}
+              <button class="btn btn-sm btn-paper-view" data-session-id="${escapeHtml(s.session_id)}" style="padding: 2px 8px; font-size: 0.75rem; background: var(--card-border); color: var(--text); border:none; border-radius: 4px; cursor:pointer;">View</button>
+              ${s.status === 'CREATED' || s.status === 'PAUSED' ? `<button class="btn btn-sm btn-paper-start" data-session-id="${escapeHtml(s.session_id)}" style="padding: 2px 8px; font-size: 0.75rem; background: var(--success); color: #fff; border:none; border-radius: 4px; cursor:pointer;">Start</button>` : ''}
+              ${s.status === 'RUNNING' ? `<button class="btn btn-sm btn-paper-stop" data-session-id="${escapeHtml(s.session_id)}" style="padding: 2px 8px; font-size: 0.75rem; background: var(--danger); color: #fff; border:none; border-radius: 4px; cursor:pointer;">Stop</button>` : ''}
             </td>
           </tr>
         `).join('');
+
+        tbody.onclick = (ev) => {
+          const viewBtn = ev.target.closest('.btn-paper-view');
+          if (viewBtn) viewPaperSession(viewBtn.getAttribute('data-session-id'));
+          const startBtn = ev.target.closest('.btn-paper-start');
+          if (startBtn) startPaperSession(startBtn.getAttribute('data-session-id'));
+          const stopBtn = ev.target.closest('.btn-paper-stop');
+          if (stopBtn) stopPaperSession(stopBtn.getAttribute('data-session-id'));
+        };
       } catch (err) {
         console.error('Failed to load paper sessions:', err);
       }
@@ -1625,7 +1652,7 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
       } else {
         posTbody.innerHTML = positions.map(p => `
           <tr>
-            <td><strong>${p.symbol}</strong></td>
+            <td><strong>${escapeHtml(p.symbol)}</strong></td>
             <td>${p.quantity}</td>
             <td>₹${p.average_entry_price.toFixed(2)}</td>
             <td>₹${p.current_price.toFixed(2)}</td>
@@ -1648,17 +1675,24 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         }
         tbody.innerHTML = items.map(c => `
           <tr>
-            <td style="font-family: var(--font-mono);">${c.connection_id}</td>
-            <td><strong>${c.broker_name}</strong></td>
-            <td><span class="badge badge-completed">${c.environment}</span></td>
-            <td style="font-family: var(--font-mono);">${c.api_key_masked || 'None'}</td>
+            <td style="font-family: var(--font-mono);">${escapeHtml(c.connection_id)}</td>
+            <td><strong>${escapeHtml(c.broker_name)}</strong></td>
+            <td><span class="badge badge-completed">${escapeHtml(c.environment)}</span></td>
+            <td style="font-family: var(--font-mono);">${escapeHtml(c.api_key_masked || 'None')}</td>
             <td>${c.api_secret_configured ? '<span style="color:var(--success)">Configured</span>' : '<span style="color:var(--text-muted)">None</span>'}</td>
             <td>
-              <button class="btn btn-sm" onclick="testBrokerConnection('${c.connection_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--accent); color: #fff; border:none; border-radius: 4px; cursor:pointer;">Test</button>
-              <button class="btn btn-sm" onclick="deleteBrokerConnection('${c.connection_id}')" style="padding: 2px 8px; font-size: 0.75rem; background: var(--card-border); color: var(--text); border:none; border-radius: 4px; cursor:pointer;">Delete</button>
+              <button class="btn btn-sm btn-broker-test" data-conn-id="${escapeHtml(c.connection_id)}" style="padding: 2px 8px; font-size: 0.75rem; background: var(--accent); color: #fff; border:none; border-radius: 4px; cursor:pointer;">Test</button>
+              <button class="btn btn-sm btn-broker-del" data-conn-id="${escapeHtml(c.connection_id)}" style="padding: 2px 8px; font-size: 0.75rem; background: var(--card-border); color: var(--text); border:none; border-radius: 4px; cursor:pointer;">Delete</button>
             </td>
           </tr>
         `).join('');
+
+        tbody.onclick = (ev) => {
+          const testBtn = ev.target.closest('.btn-broker-test');
+          if (testBtn) testBrokerConnection(testBtn.getAttribute('data-conn-id'));
+          const delBtn = ev.target.closest('.btn-broker-del');
+          if (delBtn) deleteBrokerConnection(delBtn.getAttribute('data-conn-id'));
+        };
       } catch (err) {
         console.error('Failed to load broker connections:', err);
       }

@@ -72,3 +72,54 @@ class VWAP(IndicatorContract):
             "vwap_upper": vwap_upper,
             "vwap_lower": vwap_lower,
         }
+
+
+def compute_session_vwap(df, timezone_str: str = "Asia/Kolkata"):
+    """Computes session-reset cumulative VWAP across IST sessions.
+
+    VWAP resets at the beginning of each trading day in Asia/Kolkata timezone.
+    For each session:
+        TP = (High + Low + Close) / 3
+        VWAP_t = sum(TP * Volume) / sum(Volume)
+    """
+    import pandas as pd
+    from zoneinfo import ZoneInfo
+
+    high_col = next((c for c in ["High", "high"] if c in df.columns), None)
+    low_col = next((c for c in ["Low", "low"] if c in df.columns), None)
+    close_col = next((c for c in ["Close", "close"] if c in df.columns), None)
+    vol_col = next((c for c in ["Volume", "volume"] if c in df.columns), None)
+
+    if high_col is None or low_col is None or close_col is None:
+        raise ValueError("DataFrame must contain High, Low, Close columns")
+
+    tp = (df[high_col].astype(float) + df[low_col].astype(float) + df[close_col].astype(float)) / 3.0
+    vol = df[vol_col].astype(float) if vol_col else pd.Series(0.0, index=df.index)
+
+    # Identify session dates
+    ts = None
+    if "timestamp" in df.columns:
+        ts = pd.to_datetime(df["timestamp"])
+    elif isinstance(df.index, pd.DatetimeIndex):
+        ts = pd.to_datetime(df.index)
+
+    if ts is not None:
+        tz = ZoneInfo(timezone_str)
+        if ts.dt.tz is None:
+            session_dates = ts.dt.tz_localize("UTC").dt.tz_convert(tz).dt.date
+        else:
+            session_dates = ts.dt.tz_convert(tz).dt.date
+    else:
+        session_dates = pd.Series(0, index=df.index)
+
+    vwap_res = pd.Series(index=df.index, dtype=float)
+
+    for _, idxs in df.groupby(session_dates).groups.items():
+        s_tp = tp.loc[idxs]
+        s_vol = vol.loc[idxs]
+        s_tp_v = (s_tp * s_vol).cumsum()
+        s_cum_v = s_vol.cumsum()
+        s_vwap = np.where(s_cum_v > 0, s_tp_v / s_cum_v, s_tp)
+        vwap_res.loc[idxs] = s_vwap
+
+    return vwap_res

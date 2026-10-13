@@ -76,9 +76,23 @@ class AutonomousResearchBot:
                 if row:
                     p_data = json.loads(row["portfolio_data"])
                     eod_summary["total_sessions"] = 1
-                    eod_summary["ending_equity"] = p_data.get("total_equity", 50000.0)
+                    cash = p_data.get("cash", 0.0)
+                    positions = p_data.get("positions", {})
+                    if isinstance(positions, dict):
+                        positions_val = sum(pos.get("market_value", 0.0) for pos in positions.values())
+                    elif isinstance(positions, list):
+                        positions_val = sum(pos.get("market_value", 0.0) for pos in positions)
+                    else:
+                        positions_val = 0.0
+                    computed_equity = cash + positions_val
+                    if "total_equity" in p_data:
+                        eod_summary["ending_equity"] = float(p_data["total_equity"])
+                    elif computed_equity > 0:
+                        eod_summary["ending_equity"] = float(computed_equity)
+                    else:
+                        eod_summary["ending_equity"] = 50000.0
                     eod_summary["realized_pnl"] = p_data.get("total_realized_pnl", 0.0)
-                    eod_summary["open_positions"] = len(p_data.get("positions", {}))
+                    eod_summary["open_positions"] = len(positions)
                 conn.close()
             except Exception as e:
                 logger.warning(f"Error querying EOD database: {e}")
@@ -262,12 +276,13 @@ class AutonomousResearchBot:
         returns_arr = np.array(trades)
         mean_ret = float(np.mean(returns_arr))
         std_ret = float(np.std(returns_arr)) if np.std(returns_arr) > 0 else 1.0
-        sharpe = (mean_ret / std_ret) * np.sqrt(252 * 6)  # Approx hourly annualization
+        per_trade_sharpe = mean_ret / std_ret
+        sharpe = per_trade_sharpe * np.sqrt(252 * 6)  # Approx hourly annualization
 
         # Deflated Sharpe Ratio (DSR) using Bailey & Lopez de Prado (2014)
         skew, kurt = StatisticalMetricsEngine.calculate_higher_moments(returns_arr)
         dsr, _ = StatisticalMetricsEngine.calculate_dsr(
-            sharpe=sharpe,
+            sharpe=per_trade_sharpe,
             skew=skew,
             kurt=kurt,
             sample_size=len(trades),
@@ -275,11 +290,11 @@ class AutonomousResearchBot:
             var_trials=0.25,
         )
 
-        # Max drawdown
-        cum_ret = np.cumprod(1.0 + returns_arr)
+        # Max drawdown: baseline at 1.0 so the first trade loss is included
+        cum_ret = np.insert(np.cumprod(1.0 + returns_arr), 0, 1.0)
         peak = np.maximum.accumulate(cum_ret)
         drawdowns = (peak - cum_ret) / peak
-        max_dd = float(np.max(drawdowns)) * 100
+        max_dd = float(np.max(drawdowns)) * 100.0
 
         is_robust = dsr >= 0.50 and profit_factor >= 1.10 and max_dd <= 12.0
 

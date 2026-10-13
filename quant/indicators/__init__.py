@@ -23,7 +23,7 @@ from quant.indicators.roc import ROC
 from quant.indicators.atr import ATR
 from quant.indicators.bollinger import BollingerBands
 from quant.indicators.realized_volatility import RealizedVolatility
-from quant.indicators.vwap import VWAP
+from quant.indicators.vwap import VWAP, compute_session_vwap
 from quant.indicators.obv import OBV
 from quant.indicators.relative_volume import RelativeVolume
 
@@ -45,6 +45,7 @@ __all__ = [
     "RealizedVolatility",
     # Volume
     "VWAP",
+    "compute_session_vwap",
     "OBV",
     "RelativeVolume",
 ]

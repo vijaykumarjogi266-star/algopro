@@ -116,6 +116,26 @@ class BacktestRunStore:
                 )
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_exp ON audit_events(experiment_id)")
+                conn.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    experiment_id TEXT NOT NULL,
+                    trade_data TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_exp ON trades(experiment_id)")
+                conn.execute("""
+                CREATE TABLE IF NOT EXISTS equity_curves (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    experiment_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    equity REAL NOT NULL,
+                    cash REAL NOT NULL,
+                    positions_value REAL NOT NULL
+                )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_equity_exp ON equity_curves(experiment_id)")
 
     def save_run(
         self,
@@ -209,6 +229,60 @@ class BacktestRunStore:
                 }
                 for r in cur.fetchall()
             ]
+
+    def get_audit_events(self, experiment_id: str) -> List[Dict[str, Any]]:
+        """Alias for get_audit_trail."""
+        return self.get_audit_trail(experiment_id)
+
+    def save_trade(self, experiment_id: str, trade: Dict[str, Any]) -> None:
+        """Saves a trade record for an experiment."""
+        with self._lock:
+            conn = self._get_connection()
+            with conn:
+                conn.execute("""
+                INSERT INTO trades (experiment_id, trade_data, created_at)
+                VALUES (?, ?, ?)
+                """, (
+                    experiment_id,
+                    json.dumps(trade, default=str),
+                    datetime.now(timezone.utc).isoformat(),
+                ))
+
+    def get_trades(self, experiment_id: str) -> List[Dict[str, Any]]:
+        """Retrieves all executed trades for an experiment."""
+        with self._lock:
+            conn = self._get_connection()
+            cur = conn.execute(
+                "SELECT trade_data FROM trades WHERE experiment_id = ? ORDER BY id ASC",
+                (experiment_id,)
+            )
+            return [json.loads(r["trade_data"]) for r in cur.fetchall()]
+
+    def save_equity_point(self, experiment_id: str, timestamp: str, equity: float, cash: float, positions_value: float) -> None:
+        """Saves an equity curve observation point."""
+        with self._lock:
+            conn = self._get_connection()
+            with conn:
+                conn.execute("""
+                INSERT INTO equity_curves (experiment_id, timestamp, equity, cash, positions_value)
+                VALUES (?, ?, ?, ?, ?)
+                """, (
+                    experiment_id,
+                    timestamp,
+                    float(equity),
+                    float(cash),
+                    float(positions_value),
+                ))
+
+    def get_equity_curve(self, experiment_id: str) -> List[Dict[str, Any]]:
+        """Retrieves equity curve points for an experiment."""
+        with self._lock:
+            conn = self._get_connection()
+            cur = conn.execute(
+                "SELECT timestamp, equity, cash, positions_value FROM equity_curves WHERE experiment_id = ? ORDER BY id ASC",
+                (experiment_id,)
+            )
+            return [dict(r) for r in cur.fetchall()]
 
     def get_run(self, experiment_id: str) -> Optional[Dict[str, Any]]:
         """Retrieves raw run details by experiment ID."""
