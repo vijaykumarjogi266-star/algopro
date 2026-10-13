@@ -18,7 +18,7 @@ import secrets
 import tempfile
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from services.execution_gateway.contracts import (
     GatewayState,
@@ -43,18 +43,37 @@ class CircuitBreakerEngine:
         config: Optional[CircuitBreakerConfig] = None,
         state_file_path: Optional[str] = None,
         initial_equity: float = 100_000.0,
+        rearm_secret: Optional[str] = None,
+        state_integrity_key: Optional[Union[str, bytes]] = None,
+        env: Optional[str] = None,
+        require_established_state: Optional[bool] = None,
+        allow_uninitialized: Optional[bool] = None,
     ):
         self.config = config or CircuitBreakerConfig()
         self.state_file_path = state_file_path
         self._lock = threading.Lock()
 
         # Secure rearm secret resolution (Fail-Closed in Production)
-        env = os.environ.get("ENVIRONMENT", "development").lower()
-        secret = self.config.rearm_secret or os.environ.get("CIRCUIT_BREAKER_REARM_SECRET")
-        secret_hash = self.config.rearm_secret_hash or os.environ.get("CIRCUIT_BREAKER_REARM_SECRET_HASH")
+        config_env = self.config.env if self.config else None
+        resolved_env = (
+            env
+            or config_env
+            or os.environ.get("ENVIRONMENT", "development")
+        ).lower()
+        self.env = resolved_env
+
+        secret = (
+            rearm_secret
+            or self.config.rearm_secret
+            or os.environ.get("CIRCUIT_BREAKER_REARM_SECRET")
+        )
+        secret_hash = (
+            self.config.rearm_secret_hash
+            or os.environ.get("CIRCUIT_BREAKER_REARM_SECRET_HASH")
+        )
 
         if not secret and not secret_hash:
-            if env in ("production", "prod", "staging"):
+            if resolved_env in ("production", "prod", "staging"):
                 raise RuntimeError(
                     "Production circuit breaker startup failed closed: "
                     "CIRCUIT_BREAKER_REARM_SECRET or CIRCUIT_BREAKER_REARM_SECRET_HASH must be configured."
@@ -66,9 +85,13 @@ class CircuitBreakerEngine:
             self._rearm_secret_digest = hashlib.sha256(secret.encode("utf-8")).digest()
 
         # Dedicated independent state integrity key (NEVER reuse rearm secret, NO static fallback)
-        integrity_key = self.config.state_integrity_key or os.environ.get("CIRCUIT_BREAKER_STATE_KEY")
+        integrity_key = (
+            state_integrity_key
+            or self.config.state_integrity_key
+            or os.environ.get("CIRCUIT_BREAKER_STATE_KEY")
+        )
         if not integrity_key:
-            if env in ("production", "prod", "staging") and self.state_file_path:
+            if resolved_env in ("production", "prod", "staging") and self.state_file_path:
                 raise RuntimeError(
                     "Production circuit breaker startup failed closed: "
                     "CIRCUIT_BREAKER_STATE_KEY must be configured for persistent state integrity."
@@ -81,6 +104,18 @@ class CircuitBreakerEngine:
             self._state_integrity_key = bytes(integrity_key)
 
         self._persistence_error: Optional[str] = None
+        self.allow_uninitialized = allow_uninitialized
+        self.require_established_state = (
+            require_established_state
+            if require_established_state is not None
+            else (self.config.require_established_state if self.config else None)
+        )
+        if self.require_established_state is None:
+            self.require_established_state = bool(
+                resolved_env in ("production", "prod", "staging")
+                and self.state_file_path
+                and not allow_uninitialized
+            )
 
         # Monotonic time tracking for watchdog & rate limiter
         self._last_heartbeat_monotonic = time.monotonic()
@@ -240,6 +275,7 @@ class CircuitBreakerEngine:
             saved_reasons = list(self._trip_reasons)
             saved_hwm = self._high_water_mark
             saved_baseline = self._day_start_equity
+            saved_persistence_error = self._persistence_error
 
             # Attempt durable clearance first
             try:
@@ -254,9 +290,11 @@ class CircuitBreakerEngine:
                 self._trip_reasons = saved_reasons
                 self._high_water_mark = saved_hwm
                 self._day_start_equity = saved_baseline
+                self._persistence_error = saved_persistence_error or str(e)
                 return False
 
-            # Emit success audit ONLY after durable transition succeeds
+            # Clear stale persistence errors only after verified recovery
+            self._persistence_error = None
             self._state = GatewayState.NORMAL
             self._trip_reasons.clear()
             self._high_water_mark = self._current_equity
@@ -268,6 +306,38 @@ class CircuitBreakerEngine:
             )
             return True
 
+    def _sync_dir(self, dir_name: str) -> None:
+        """Fsync directory to guarantee durable entry changes across power loss.
+        Propagates OSError on failure without swallowing."""
+        if not dir_name:
+            return
+        dir_fd = os.open(dir_name, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def sync_directory(self, dir_name: Optional[str] = None) -> None:
+        """Public helper to fsync directory descriptor without swallowing errors."""
+        target_dir = dir_name or (os.path.dirname(self.state_file_path) if self.state_file_path else "")
+        self._sync_dir(target_dir)
+
+    def _write_failure_marker(self, error_msg: str) -> None:
+        """Write persistent failure marker so failed halt persistence blocks subsequent restart."""
+        if not self.state_file_path:
+            return
+        marker_path = self.state_file_path + ".failed"
+        try:
+            dir_name = os.path.dirname(marker_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            with open(marker_path, "w") as mf:
+                mf.write(f"PERSISTENCE_FAILURE: {error_msg}\n")
+            if dir_name:
+                self._sync_dir(dir_name)
+        except Exception:
+            pass
+
     def _trip_halt_locked(self, reason: str) -> None:
         """Internal helper to lock state to EMERGENCY_HALT and persist to disk."""
         if reason not in self._trip_reasons:
@@ -276,7 +346,7 @@ class CircuitBreakerEngine:
         if self.state_file_path:
             self._persist_disk_state()
 
-    def _persist_disk_state(self) -> None:
+    def _persist_disk_state(self, raise_on_error: bool = False) -> None:
         """Write persistent EMERGENCY_HALT state to disk with file locking and keyed HMAC digest."""
         if not self.state_file_path:
             return
@@ -310,45 +380,61 @@ class CircuitBreakerEngine:
 
             # Fsync directory descriptor to guarantee durability across power failure
             if dir_name:
-                try:
-                    dir_fd = os.open(dir_name, os.O_RDONLY)
-                    try:
-                        os.fsync(dir_fd)
-                    finally:
-                        os.close(dir_fd)
-                except Exception:
-                    pass
+                self._sync_dir(dir_name)
 
             self._persistence_error = None
         except Exception as e:
             self._persistence_error = str(e)
-            if "PERSISTENCE_FAILURE" not in self._trip_reasons:
+            if f"PERSISTENCE_FAILURE: {str(e)}" not in self._trip_reasons:
                 self._trip_reasons.append(f"PERSISTENCE_FAILURE: {str(e)}")
+            self._write_failure_marker(str(e))
             logger.error(
                 "Failed to persist circuit breaker state to disk",
                 extra={"error": str(e), "state_path": self.state_file_path},
             )
+            if raise_on_error:
+                raise
 
     def _clear_disk_state(self) -> None:
         """Remove disk state file when re-armed. Raises if persistent clearance fails."""
         if not self.state_file_path:
             return
+        dir_name = os.path.dirname(self.state_file_path)
         if os.path.exists(self.state_file_path):
             os.remove(self.state_file_path)
-            dir_name = os.path.dirname(self.state_file_path)
             if dir_name:
-                try:
-                    dir_fd = os.open(dir_name, os.O_RDONLY)
-                    try:
-                        os.fsync(dir_fd)
-                    finally:
-                        os.close(dir_fd)
-                except Exception:
-                    pass
+                self._sync_dir(dir_name)
+
+        marker_path = self.state_file_path + ".failed"
+        if os.path.exists(marker_path):
+            os.remove(marker_path)
+            if dir_name:
+                self._sync_dir(dir_name)
 
     def _restore_disk_state(self) -> None:
         """Restore gateway state from persistent disk file on startup (Fail-Closed Startup)."""
-        if not self.state_file_path or not os.path.exists(self.state_file_path):
+        if not self.state_file_path:
+            return
+
+        marker_path = self.state_file_path + ".failed"
+        if os.path.exists(marker_path):
+            logger.error(
+                "Detected failed halt persistence marker; failing closed to EMERGENCY_HALT",
+                extra={"marker_path": marker_path},
+            )
+            self._state = GatewayState.EMERGENCY_HALT
+            self._trip_reasons = ["FAILED_PERSISTENCE_RESTART_BLOCKED"]
+            self._persistence_error = "Previous halt persistence failed on disk"
+            return
+
+        if not os.path.exists(self.state_file_path):
+            if self.require_established_state:
+                logger.error(
+                    "Required established persistent state is missing; failing closed to EMERGENCY_HALT",
+                    extra={"state_path": self.state_file_path},
+                )
+                self._state = GatewayState.EMERGENCY_HALT
+                self._trip_reasons = ["MISSING_ESTABLISHED_STATE_FAIL_CLOSED"]
             return
 
         try:
@@ -382,12 +468,34 @@ class CircuitBreakerEngine:
             if not isinstance(reasons, list) or not all(isinstance(r, str) for r in reasons):
                 raise ValueError("trip_reasons must be a list of strings")
 
+            # Validate finite positive equity and consistent HWM
+            raw_hwm = data.get("high_water_mark")
+            raw_day_start = data.get("day_start_equity")
+            raw_current = data.get("current_equity")
+
+            for name, val in [
+                ("high_water_mark", raw_hwm),
+                ("day_start_equity", raw_day_start),
+                ("current_equity", raw_current),
+            ]:
+                if val is None or not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val) or val <= 0.0:
+                    raise ValueError(f"Invalid non-finite or non-positive equity value for {name}: {val}")
+
+            hwm = float(raw_hwm)
+            day_start = float(raw_day_start)
+            current = float(raw_current)
+
+            if hwm < current:
+                raise ValueError(
+                    f"Inconsistent equity state: high_water_mark ({hwm}) cannot be less than current_equity ({current})"
+                )
+
             if raw_state == GatewayState.EMERGENCY_HALT.value:
                 self._state = GatewayState.EMERGENCY_HALT
                 self._trip_reasons = list(reasons) or ["PERSISTED_DISK_HALT"]
-                self._high_water_mark = float(data.get("high_water_mark", self._high_water_mark))
-                self._day_start_equity = float(data.get("day_start_equity", self._day_start_equity))
-                self._current_equity = float(data.get("current_equity", self._current_equity))
+                self._high_water_mark = hwm
+                self._day_start_equity = day_start
+                self._current_equity = current
         except Exception as e:
             logger.error(
                 "Failed to restore circuit breaker disk state; failing closed to EMERGENCY_HALT",
