@@ -36,7 +36,7 @@ class DatasetDriftError(Exception):
     pass
 
 
-class DatasetIntegrityError(Exception):
+class DatasetIntegrityError(DatasetDriftError):
     """Raised on dataset validation or consistency failure."""
     pass
 
@@ -123,7 +123,7 @@ class DatasetRegistryStore:
             with conn:
                 conn.execute("""
                 CREATE TABLE IF NOT EXISTS datasets (
-                    dataset_id TEXT PRIMARY KEY,
+                    dataset_id TEXT NOT NULL,
                     name TEXT NOT NULL,
                     version TEXT NOT NULL,
                     exchange TEXT NOT NULL,
@@ -138,7 +138,8 @@ class DatasetRegistryStore:
                     storage_path TEXT,
                     metadata TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (dataset_id, version)
                 )
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_version ON datasets(name, version)")
@@ -155,9 +156,8 @@ class DatasetRegistryStore:
                     symbols, start_date, end_date, bar_count, sha256_checksum,
                     quality_status, storage_path, metadata, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(dataset_id) DO UPDATE SET
+                ON CONFLICT(dataset_id, version) DO UPDATE SET
                     name = excluded.name,
-                    version = excluded.version,
                     exchange = excluded.exchange,
                     asset_class = excluded.asset_class,
                     timeframe = excluded.timeframe,
@@ -190,12 +190,34 @@ class DatasetRegistryStore:
                 ))
             return record
 
-    def get_dataset(self, dataset_id: str) -> Optional[DatasetRecord]:
-        """Retrieves a dataset record by ID."""
+    def get_dataset(self, dataset_id: str, version: Optional[str] = None) -> Optional[DatasetRecord]:
+        """Retrieves a dataset record by ID, optionally matching version."""
         with self._lock:
             conn = self._get_connection()
-            cursor = conn.execute("SELECT * FROM datasets WHERE dataset_id = ?", (dataset_id,))
-            row = cursor.fetchone()
+            if version:
+                cursor = conn.execute(
+                    "SELECT * FROM datasets WHERE dataset_id = ? AND version = ?",
+                    (dataset_id, version),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    cursor = conn.execute(
+                        "SELECT * FROM datasets WHERE name = ? AND version = ?",
+                        (dataset_id, version),
+                    )
+                    row = cursor.fetchone()
+            else:
+                cursor = conn.execute(
+                    "SELECT * FROM datasets WHERE dataset_id = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                    (dataset_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    cursor = conn.execute(
+                        "SELECT * FROM datasets WHERE name = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                        (dataset_id,),
+                    )
+                    row = cursor.fetchone()
             if not row:
                 return None
             return self._row_to_record(row)
@@ -212,12 +234,14 @@ class DatasetRegistryStore:
         dataset_id: str,
         bars: List[CanonicalMarketDataBar],
         fail_closed: bool = True,
+        version: Optional[str] = None,
     ) -> bool:
-        """Verifies market data bars against registered cryptographic checksum.
+        """Verifies market data bars against registered cryptographic checksum and data constraints.
         
         If fail_closed is True, raises DatasetDriftError or DatasetIntegrityError on mismatch.
         """
-        record = self.get_dataset(dataset_id)
+        import math
+        record = self.get_dataset(dataset_id, version=version)
         if not record:
             if fail_closed:
                 raise DatasetNotFoundError(f"Dataset '{dataset_id}' not found in registry")
@@ -230,6 +254,15 @@ class DatasetRegistryStore:
                 )
             return False
 
+        # Validate declared bar count against complete dataset
+        if len(bars) != record.bar_count:
+            if fail_closed:
+                raise DatasetIntegrityError(
+                    f"Bar count mismatch for '{dataset_id}': declared {record.bar_count}, actual {len(bars)}"
+                )
+            return False
+
+        # Validate cryptographic checksum
         current_checksum = compute_dataset_checksum(bars)
         if current_checksum != record.sha256_checksum:
             if fail_closed:
@@ -239,12 +272,52 @@ class DatasetRegistryStore:
                 )
             return False
 
+        # Validate finite positive prices, valid OHLC relationships, nonnegative volume, timezone-aware, no duplicates
+        seen_timestamps = set()
+        for b in bars:
+            ts = getattr(b, "timestamp", getattr(b, "date", None))
+            sym = getattr(b, "symbol", "")
+            if ts is None or getattr(ts, "tzinfo", None) is None:
+                if fail_closed:
+                    raise DatasetIntegrityError(f"Bar for {sym} has naive or missing timestamp: {ts}")
+                return False
+            key = (sym, ts.astimezone(timezone.utc).isoformat())
+            if key in seen_timestamps:
+                if fail_closed:
+                    raise DatasetIntegrityError(f"Duplicate bar detected for {sym} at {ts}")
+                return False
+            seen_timestamps.add(key)
+
+            o = float(getattr(b, "open", 0.0))
+            h = float(getattr(b, "high", 0.0))
+            l = float(getattr(b, "low", 0.0))
+            c = float(getattr(b, "close", 0.0))
+            v = float(getattr(b, "volume", 0.0))
+
+            for p_name, p_val in [("open", o), ("high", h), ("low", l), ("close", c)]:
+                if math.isnan(p_val) or math.isinf(p_val) or p_val <= 0.0:
+                    if fail_closed:
+                        raise DatasetIntegrityError(f"Bar price {p_name}={p_val} must be finite positive")
+                    return False
+
+            if not (l <= o <= h and l <= c <= h and l <= h):
+                if fail_closed:
+                    raise DatasetIntegrityError(f"Bar OHLC violation for {sym}: O={o}, H={h}, L={l}, C={c}")
+                return False
+
+            if math.isnan(v) or math.isinf(v) or v < 0.0:
+                if fail_closed:
+                    raise DatasetIntegrityError(f"Bar volume={v} must be non-negative finite")
+                return False
+
         return True
 
-    def quarantine_dataset(self, dataset_id: str, reason: str) -> DatasetRecord:
+    verify_dataset_bars = verify_dataset_integrity
+
+    def quarantine_dataset(self, dataset_id: str, reason: str, version: Optional[str] = None) -> DatasetRecord:
         """Marks a dataset as CORRUPTED/REJECTED, preventing any future trading decision."""
         with self._lock:
-            record = self.get_dataset(dataset_id)
+            record = self.get_dataset(dataset_id, version=version)
             if not record:
                 raise DatasetNotFoundError(f"Dataset '{dataset_id}' not found in registry")
 

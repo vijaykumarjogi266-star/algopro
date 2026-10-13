@@ -102,9 +102,14 @@ class BacktestService:
         self.dataset_store = dataset_store or DatasetRegistryStore()
         self._in_memory_dataset_bars: Dict[str, List[Any]] = {}
 
-    def register_dataset_bars(self, dataset_id: str, bars: List[Any]) -> None:
+    def register_dataset_bars(self, dataset_id: str, bars: List[Any], version: Optional[str] = None) -> None:
         """Registers in-memory market data bars associated with a dataset identifier."""
         self._in_memory_dataset_bars[dataset_id] = bars
+        if version:
+            self._in_memory_dataset_bars[(dataset_id, version)] = bars
+            self._in_memory_dataset_bars[f"{dataset_id}:{version}"] = bars
+
+    register_in_memory_dataset = register_dataset_bars
 
     def _ensure_default_dataset(self) -> None:
         """Seeds canonical in-memory bars and registry entry for NSE_NIFTY50_DAILY."""
@@ -163,7 +168,7 @@ class BacktestService:
         timeframe: str = "1d",
         cost_model: Optional[CostModelConfig] = None,
         slippage_model: Optional[SlippageModelConfig] = None,
-        dataset_version: str = "2026.09.14",
+        dataset_version: Optional[str] = None,
         git_commit: str = "main",
         experiment_id: Optional[str] = None,
         dataset_id: Optional[str] = None,
@@ -182,6 +187,19 @@ class BacktestService:
         cost_cfg = cost_model or CostModelConfig()
         slip_cfg = slippage_model or SlippageModelConfig()
         params = parameters or {}
+
+        target_ds_id = dataset_id or "NSE_NIFTY50_DAILY"
+        if target_ds_id == "NSE_NIFTY50_DAILY":
+            self._ensure_default_dataset()
+
+        if dataset_version is None:
+            ds_rec = self.dataset_store.get_dataset(target_ds_id)
+            dataset_version = ds_rec.version if ds_rec else "2026.09.14"
+
+        if dataset_checksum is None:
+            ds_rec = self.dataset_store.get_dataset(target_ds_id, version=dataset_version)
+            if ds_rec:
+                dataset_checksum = ds_rec.sha256_checksum
 
         # 2. Compute deterministic reproducibility hash
         repro_dict = {
@@ -229,9 +247,9 @@ class BacktestService:
                 name=f"Run_{experiment_id}",
                 strategy_id=strategy_id,
                 strategy_version="1.0.0",
-                dataset_id=dataset_id or "NSE_NIFTY50_DAILY",
+                dataset_id=target_ds_id,
                 dataset_version=dataset_version,
-                dataset_checksum=dataset_checksum or ("f" * 64),
+                dataset_checksum=dataset_checksum or "",
                 universe=sorted(universe),
                 timeframe=timeframe,
                 start_date=start_date,
@@ -431,7 +449,7 @@ class BacktestService:
         all_bars: Dict[str, List[Dict[str, Any]]],
         strategy_id: str = "SMA_Cross",
     ) -> Tuple[List[Dict[str, Any]], List[float]]:
-        """Run deterministic causal bar-by-bar simulation."""
+        """Run deterministic causal timestamp-aligned simulation."""
         cost_cfg = repro.cost_model
         slip_cfg = repro.slippage_model
         params = repro.parameters or {}
@@ -447,23 +465,31 @@ class BacktestService:
         positions: Dict[str, Dict[str, Any]] = {}
         equity_curve: List[float] = []
 
-        max_bars = max((len(b) for b in all_bars.values()), default=0)
-        if max_bars == 0:
+        timeline = sorted(set(b["date"] for bars in all_bars.values() for b in bars))
+        if not timeline:
             return trades, [cash]
 
-        if not is_buy_and_hold and max_bars < slow_period + 1:
-            equity_curve = [cash] * max_bars
-            return trades, equity_curve
+        bar_by_sym_ts: Dict[str, Dict[Any, Dict[str, Any]]] = {
+            sym: {b["date"]: b for b in bars} for sym, bars in all_bars.items()
+        }
+        closes_by_sym: Dict[str, List[float]] = {sym: [] for sym in all_bars}
+        last_known_close: Dict[str, float] = {}
+        last_known_open: Dict[str, float] = {}
+        sym_has_entered: set = set()
 
         pending_entries: Dict[str, float] = {}  # symbol -> signal_price
         pending_exits: set = set()
 
-        for bar_idx in range(max_bars):
-            # Portfolio mark at bar open before trading actions
+        for t_idx, current_ts in enumerate(timeline):
+            # Update latest open prices for symbols trading at current_ts
+            for sym in all_bars:
+                if current_ts in bar_by_sym_ts[sym]:
+                    last_known_open[sym] = bar_by_sym_ts[sym][current_ts]["open"]
+
+            # Portfolio mark at open before trading actions
             open_pos_val = sum(
-                all_bars[sym][bar_idx]["open"] * pos["qty"]
+                (bar_by_sym_ts[sym][current_ts]["open"] if current_ts in bar_by_sym_ts[sym] else last_known_close.get(sym, pos["entry_price"])) * pos["qty"]
                 for sym, pos in positions.items()
-                if bar_idx < len(all_bars[sym])
             )
             current_portfolio_val = cash + open_pos_val
             if current_portfolio_val > peak_portfolio_val:
@@ -471,13 +497,11 @@ class BacktestService:
             current_drawdown_pct = max(0.0, (peak_portfolio_val - current_portfolio_val) / peak_portfolio_val) if peak_portfolio_val > 0 else 0.0
             current_daily_loss_pct = max(0.0, (prev_close_val - current_portfolio_val) / prev_close_val) if prev_close_val > 0 else 0.0
 
-            # 1. Fill pending exits at bar_idx open
-            # Intrabar causality: open exits execute before intrabar low stops
+            # 1. Fill pending exits at open for symbols with a bar at current_ts
             for sym in list(positions.keys()):
-                bars = all_bars[sym]
-                if bar_idx >= len(bars):
+                if current_ts not in bar_by_sym_ts[sym]:
                     continue
-                bar = bars[bar_idx]
+                bar = bar_by_sym_ts[sym][current_ts]
                 pos = positions[sym]
                 qty = pos["qty"]
                 entry_p = pos["entry_price"]
@@ -486,17 +510,15 @@ class BacktestService:
                 exit_price = None
                 exit_reason = None
 
-                # Check gap-down through stop at OPEN first
+                # Gap-down check at OPEN first
                 if bar["open"] <= stop_loss:
                     raw_exit = min(bar["open"], stop_loss)
                     exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
                     exit_reason = "STOP_LOSS_GAP"
-                # Check pending exit order at OPEN next (causal open exit before intrabar low!)
                 elif sym in pending_exits:
                     raw_exit = bar["open"]
                     exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
                     exit_reason = "SIGNAL_EXIT"
-                # Check intrabar low stop loss during trading session only if not exited at open
                 elif bar["low"] <= stop_loss:
                     raw_exit = stop_loss
                     exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
@@ -510,11 +532,11 @@ class BacktestService:
                     total_slip = pos.get("entry_slippage", 0.0) + (slip_pts * qty)
                     net_pnl = (exit_price * qty - exit_cost) - (entry_p * qty + entry_cost)
                     cash += (exit_price * qty - exit_cost)
-                    holding_bars = bar_idx - pos["entry_bar"]
+                    holding_bars = t_idx - pos["entry_bar"]
                     trades.append({
                         "symbol": sym,
                         "entry_bar": pos["entry_bar"],
-                        "exit_bar": bar_idx,
+                        "exit_bar": t_idx,
                         "entry_price": entry_p,
                         "exit_price": exit_price,
                         "qty": qty,
@@ -527,41 +549,47 @@ class BacktestService:
                     del positions[sym]
                     pending_exits.discard(sym)
 
-            # Buy and Hold: triggers entry on bar 0
-            if is_buy_and_hold and bar_idx == 0:
+            # Buy and Hold: queue entry on first available bar of symbol
+            if is_buy_and_hold:
                 for sym in repro.universe:
-                    if sym in all_bars and len(all_bars[sym]) > 0:
-                        pending_entries[sym] = all_bars[sym][0]["open"]
+                    if sym not in positions and sym not in sym_has_entered and current_ts in bar_by_sym_ts.get(sym, {}):
+                        pending_entries[sym] = bar_by_sym_ts[sym][current_ts]["open"]
+                        sym_has_entered.add(sym)
 
-            # 2. Fill pending entries at bar_idx open
+            # 2. Fill pending entries at open
             for sym, sig_price in list(pending_entries.items()):
-                bars = all_bars[sym]
-                if bar_idx >= len(bars):
+                if current_ts not in bar_by_sym_ts.get(sym, {}):
                     continue
-                bar = bars[bar_idx]
+                bar = bar_by_sym_ts[sym][current_ts]
                 if sym not in positions:
                     raw_entry = bar["open"]
                     entry_p, slip_pts = _calculate_slippage_price(raw_entry, "BUY", slip_cfg)
                     if is_buy_and_hold:
-                        capital_per_trade = (min(cash * 0.045, repro.initial_capital * 0.045)) / max(1, len(repro.universe))
+                        if "allocation_pct" in params:
+                            alloc_pct = float(params["allocation_pct"])
+                            weights = params.get("weights", {})
+                            weight = float(weights.get(sym, 1.0 / max(1, len(repro.universe))))
+                            capital_per_trade = repro.initial_capital * alloc_pct * weight
+                        else:
+                            capital_per_trade = (min(cash * 0.045, repro.initial_capital * 0.045)) / max(1, len(repro.universe))
                         stop_loss = round(entry_p * 0.50, 2)
                     else:
                         capital_per_trade = min(cash * 0.045, repro.initial_capital * 0.045)
                         stop_loss = round(entry_p * 0.97, 2)
 
-                    qty = max(1, int(capital_per_trade / entry_p))
+                    qty = max(1, int(capital_per_trade / entry_p)) if entry_p > 0 else 0
+                    if qty <= 0:
+                        continue
 
                     # Update portfolio state before risk evaluation
                     open_pos_val = sum(
-                        all_bars[s][bar_idx]["open"] * positions[s]["qty"]
+                        (bar_by_sym_ts[s][current_ts]["open"] if current_ts in bar_by_sym_ts[s] else last_known_close.get(s, positions[s]["entry_price"])) * positions[s]["qty"]
                         for s in positions
-                        if bar_idx < len(all_bars[s])
                     )
                     current_portfolio_val = cash + open_pos_val
                     current_drawdown_pct = max(0.0, (peak_portfolio_val - current_portfolio_val) / peak_portfolio_val) if peak_portfolio_val > 0 else 0.0
                     current_daily_loss_pct = max(0.0, (prev_close_val - current_portfolio_val) / prev_close_val) if prev_close_val > 0 else 0.0
 
-                    # Evaluate risk gate with actual loss and drawdown from portfolio state
                     risk_eval = self.risk_engine.evaluate(
                         symbol=sym,
                         price=entry_p,
@@ -576,13 +604,11 @@ class BacktestService:
                     if not risk_eval.is_approved:
                         continue
 
-                    # Respect Risk Engine approved quantity
                     approved_qty = risk_eval.approved_quantity if risk_eval.approved_quantity is not None else qty
                     if approved_qty <= 0:
                         continue
                     qty = approved_qty
 
-                    # Cash solvency check: required outflow exceeds available cash -> do not fill
                     buy_cost = _calculate_trade_costs(entry_p * qty, "BUY", cost_cfg)
                     required_outflow = (entry_p * qty) + buy_cost
                     if cash < required_outflow:
@@ -592,7 +618,7 @@ class BacktestService:
                     positions[sym] = {
                         "qty": qty,
                         "entry_price": entry_p,
-                        "entry_bar": bar_idx,
+                        "entry_bar": t_idx,
                         "stop_loss": stop_loss,
                         "entry_cost": buy_cost,
                         "entry_slippage": slip_pts * qty,
@@ -611,8 +637,8 @@ class BacktestService:
                         cash += (exit_price * qty - exit_cost)
                         trades.append({
                             "symbol": sym,
-                            "entry_bar": bar_idx,
-                            "exit_bar": bar_idx,
+                            "entry_bar": t_idx,
+                            "exit_bar": t_idx,
                             "entry_price": entry_p,
                             "exit_price": exit_price,
                             "qty": qty,
@@ -626,11 +652,16 @@ class BacktestService:
 
             pending_entries.clear()
 
-            # 3. Mark-to-market portfolio value at bar_idx close
+            # 3. Mark-to-market portfolio value at current_ts close
+            for sym in all_bars:
+                if current_ts in bar_by_sym_ts[sym]:
+                    c_price = bar_by_sym_ts[sym][current_ts]["close"]
+                    last_known_close[sym] = c_price
+                    closes_by_sym[sym].append(c_price)
+
             pos_val = sum(
-                all_bars[sym][bar_idx]["close"] * pos["qty"]
+                last_known_close.get(sym, pos["entry_price"]) * pos["qty"]
                 for sym, pos in positions.items()
-                if bar_idx < len(all_bars[sym])
             )
             close_equity = cash + pos_val
             equity_curve.append(close_equity)
@@ -638,12 +669,12 @@ class BacktestService:
             if close_equity > peak_portfolio_val:
                 peak_portfolio_val = close_equity
 
-            # 4. Generate signals at bar_idx close for execution at bar_idx + 1 open
+            # 4. Generate signals at current_ts close for execution at next open
             if not is_buy_and_hold:
-                for sym, bars in all_bars.items():
-                    if bar_idx >= len(bars):
+                for sym in all_bars:
+                    if current_ts not in bar_by_sym_ts[sym]:
                         continue
-                    closes = [b["close"] for b in bars[:bar_idx + 1]]
+                    closes = closes_by_sym[sym]
                     if len(closes) >= slow_period + 1:
                         fast_ma = float(np.mean(closes[-fast_period:]))
                         fast_ma_prev = float(np.mean(closes[-fast_period - 1:-1]))
@@ -658,36 +689,33 @@ class BacktestService:
                         elif sym not in positions and golden_cross:
                             pending_entries[sym] = closes[-1]
 
-        # Close any open positions at the last bar's close price
-        if max_bars > 0:
+        # Close any open positions at the last known close price
+        if timeline:
             for sym, pos in list(positions.items()):
-                bars = all_bars[sym]
-                if bars:
-                    last_bar = bars[-1]
-                    raw_exit = last_bar["close"]
-                    exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
-                    qty = pos["qty"]
-                    exit_trade_val = exit_price * qty
-                    exit_cost = _calculate_trade_costs(exit_trade_val, "SELL", cost_cfg)
-                    entry_cost = pos.get("entry_cost", 0.0)
-                    total_cost = entry_cost + exit_cost
-                    total_slip = pos.get("entry_slippage", 0.0) + (slip_pts * qty)
-                    net_pnl = (exit_price * qty - exit_cost) - (pos["entry_price"] * qty + entry_cost)
-                    cash += (exit_price * qty - exit_cost)
-                    holding_bars = (max_bars - 1) - pos["entry_bar"]
-                    trades.append({
-                        "symbol": sym,
-                        "entry_bar": pos["entry_bar"],
-                        "exit_bar": max_bars - 1,
-                        "entry_price": pos["entry_price"],
-                        "exit_price": exit_price,
-                        "qty": qty,
-                        "pnl": net_pnl,
-                        "cost": total_cost,
-                        "slippage": total_slip,
-                        "holding_bars": max(1, holding_bars),
-                        "reason": "FINAL_LIQUIDATION",
-                    })
+                raw_exit = last_known_close.get(sym, pos["entry_price"])
+                exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
+                qty = pos["qty"]
+                exit_trade_val = exit_price * qty
+                exit_cost = _calculate_trade_costs(exit_trade_val, "SELL", cost_cfg)
+                entry_cost = pos.get("entry_cost", 0.0)
+                total_cost = entry_cost + exit_cost
+                total_slip = pos.get("entry_slippage", 0.0) + (slip_pts * qty)
+                net_pnl = (exit_price * qty - exit_cost) - (pos["entry_price"] * qty + entry_cost)
+                cash += (exit_price * qty - exit_cost)
+                holding_bars = (len(timeline) - 1) - pos["entry_bar"]
+                trades.append({
+                    "symbol": sym,
+                    "entry_bar": pos["entry_bar"],
+                    "exit_bar": len(timeline) - 1,
+                    "entry_price": pos["entry_price"],
+                    "exit_price": exit_price,
+                    "qty": qty,
+                    "pnl": net_pnl,
+                    "cost": total_cost,
+                    "slippage": total_slip,
+                    "holding_bars": max(1, holding_bars),
+                    "reason": "FINAL_LIQUIDATION",
+                })
             if equity_curve:
                 equity_curve[-1] = cash
 
@@ -732,6 +760,7 @@ class BacktestService:
 
             # 3. Locate and validate dataset (Fail closed, no synthetic generation)
             req_dataset_id = (exp_def.dataset_id if exp_def else getattr(repro, "dataset_id", None)) or "NSE_NIFTY50_DAILY"
+            req_dataset_version = (exp_def.dataset_version if exp_def else getattr(repro, "dataset_version", None)) or "2026.09.14"
             req_checksum = exp_def.dataset_checksum if exp_def else getattr(repro, "dataset_checksum", None)
 
             if req_dataset_id == "NSE_NIFTY50_DAILY":
@@ -748,13 +777,60 @@ class BacktestService:
                     self.store.save_experiment(exp_def)
                 return
 
-            reg_ds = self.dataset_store.get_dataset(req_dataset_id)
-            raw_bars = self._in_memory_dataset_bars.get(req_dataset_id)
+            reg_ds = self.dataset_store.get_dataset(req_dataset_id, version=req_dataset_version)
+            raw_bars = (
+                self._in_memory_dataset_bars.get((req_dataset_id, req_dataset_version))
+                or self._in_memory_dataset_bars.get(f"{req_dataset_id}:{req_dataset_version}")
+                or self._in_memory_dataset_bars.get(req_dataset_id)
+            )
 
             if not reg_ds and not raw_bars:
                 self.store.append_audit_event(
                     experiment_id, "DATA_UNAVAILABLE",
                     {"dataset_id": req_dataset_id, "reason": f"Dataset '{req_dataset_id}' not found in registry."}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
+            if not reg_ds:
+                self.store.append_audit_event(
+                    experiment_id, "DATA_UNAVAILABLE",
+                    {"dataset_id": req_dataset_id, "reason": f"Dataset '{req_dataset_id}' version '{req_dataset_version}' not found in registry."}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
+            # Reject CORRUPTED / REJECTED / unvalidated datasets
+            if reg_ds.quality_status in (DataQualityStatus.CORRUPTED, DataQualityStatus.REJECTED):
+                self.store.append_audit_event(
+                    experiment_id, "DATASET_REJECTED",
+                    {"dataset_id": req_dataset_id, "status": reg_ds.quality_status.value if hasattr(reg_ds.quality_status, "value") else str(reg_ds.quality_status)}
+                )
+                self.store.append_audit_event(
+                    experiment_id, "DATA_UNAVAILABLE",
+                    {"dataset_id": req_dataset_id, "reason": f"Dataset '{req_dataset_id}' is quarantined with status {reg_ds.quality_status}."}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
+            # Validate dataset timeframe against experiment timeframe
+            if reg_ds.timeframe != repro.timeframe:
+                self.store.append_audit_event(
+                    experiment_id, "TIMEFRAME_MISMATCH",
+                    {"expected": repro.timeframe, "dataset_timeframe": reg_ds.timeframe}
+                )
+                self.store.append_audit_event(
+                    experiment_id, "DATA_UNAVAILABLE",
+                    {"dataset_id": req_dataset_id, "reason": f"Timeframe mismatch: experiment requires '{repro.timeframe}', dataset registered with '{reg_ds.timeframe}'."}
                 )
                 self.store.update_status(experiment_id, "FAILED")
                 if exp_def:
@@ -773,10 +849,44 @@ class BacktestService:
                     self.store.save_experiment(exp_def)
                 return
 
+            # Validate declared bar count against complete dataset BEFORE date interval filtering
+            if len(raw_bars) != reg_ds.bar_count:
+                self.store.append_audit_event(
+                    experiment_id, "BAR_COUNT_MISMATCH",
+                    {"expected": reg_ds.bar_count, "actual": len(raw_bars)}
+                )
+                self.store.append_audit_event(
+                    experiment_id, "DATA_UNAVAILABLE",
+                    {"dataset_id": req_dataset_id, "reason": f"Bar count mismatch: registry declared {reg_ds.bar_count}, loaded {len(raw_bars)} bars."}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
+            # Validate bar timeframe
+            for b in raw_bars:
+                b_tf = getattr(b, "timeframe", None) or (b.get("timeframe") if isinstance(b, dict) else None)
+                if b_tf and b_tf != repro.timeframe:
+                    self.store.append_audit_event(
+                        experiment_id, "TIMEFRAME_MISMATCH",
+                        {"expected": repro.timeframe, "bar_timeframe": b_tf}
+                    )
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_UNAVAILABLE",
+                        {"dataset_id": req_dataset_id, "reason": f"Bar timeframe '{b_tf}' mismatches experiment timeframe '{repro.timeframe}'."}
+                    )
+                    self.store.update_status(experiment_id, "FAILED")
+                    if exp_def:
+                        exp_def.status = ExperimentStatus.FAILED
+                        self.store.save_experiment(exp_def)
+                    return
+
             # Checksum verification
             actual_cs = compute_dataset_checksum(raw_bars)
 
-            if reg_ds and reg_ds.sha256_checksum and actual_cs != reg_ds.sha256_checksum:
+            if reg_ds.sha256_checksum and actual_cs != reg_ds.sha256_checksum:
                 self.store.append_audit_event(
                     experiment_id, "DATA_DRIFT",
                     {"expected": reg_ds.sha256_checksum, "calculated": actual_cs}
@@ -795,7 +905,7 @@ class BacktestService:
                     self.store.save_experiment(exp_def)
                 return
 
-            if req_checksum and (req_dataset_id != "NSE_NIFTY50_DAILY" or req_checksum not in ("a" * 64, "f" * 64)) and actual_cs != req_checksum:
+            if req_checksum and actual_cs != req_checksum:
                 self.store.append_audit_event(
                     experiment_id, "CHECKSUM_MISMATCH",
                     {"expected": req_checksum, "calculated": actual_cs}
@@ -809,6 +919,118 @@ class BacktestService:
                     exp_def.status = ExperimentStatus.FAILED
                     self.store.save_experiment(exp_def)
                 return
+
+            # Validate finite positive prices, valid OHLC relationships, nonnegative volume, timezone-aware, no duplicates
+            seen_timestamps = set()
+            for b in raw_bars:
+                sym = str(getattr(b, "symbol", None) or (b.get("symbol") if isinstance(b, dict) else "")).upper()
+                ts = getattr(b, "timestamp", getattr(b, "date", None)) if not isinstance(b, dict) else (b.get("timestamp") or b.get("date"))
+                if isinstance(ts, str):
+                    try:
+                        ts = datetime.fromisoformat(ts)
+                    except Exception:
+                        ts = None
+                if ts is None or getattr(ts, "tzinfo", None) is None:
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_INTEGRITY_VIOLATION",
+                        {"reason": f"Bar for {sym} has naive or missing timestamp: {ts}"}
+                    )
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_UNAVAILABLE",
+                        {"reason": "Naive or missing bar timestamp."}
+                    )
+                    self.store.update_status(experiment_id, "FAILED")
+                    if exp_def:
+                        exp_def.status = ExperimentStatus.FAILED
+                        self.store.save_experiment(exp_def)
+                    return
+
+                ts_key = (sym, ts.astimezone(timezone.utc).isoformat())
+                if ts_key in seen_timestamps:
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_INTEGRITY_VIOLATION",
+                        {"reason": f"Duplicate bar timestamp for {sym} at {ts}."}
+                    )
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_UNAVAILABLE",
+                        {"reason": "Duplicate bar timestamp detected."}
+                    )
+                    self.store.update_status(experiment_id, "FAILED")
+                    if exp_def:
+                        exp_def.status = ExperimentStatus.FAILED
+                        self.store.save_experiment(exp_def)
+                    return
+                seen_timestamps.add(ts_key)
+
+                o = float(getattr(b, "open", 0.0) if not isinstance(b, dict) else b.get("open", 0.0))
+                h = float(getattr(b, "high", 0.0) if not isinstance(b, dict) else b.get("high", 0.0))
+                l = float(getattr(b, "low", 0.0) if not isinstance(b, dict) else b.get("low", 0.0))
+                c = float(getattr(b, "close", 0.0) if not isinstance(b, dict) else b.get("close", 0.0))
+                v = float(getattr(b, "volume", 0.0) if not isinstance(b, dict) else b.get("volume", 0.0))
+
+                for p_name, p_val in [("open", o), ("high", h), ("low", l), ("close", c)]:
+                    if math.isnan(p_val) or math.isinf(p_val) or p_val <= 0.0:
+                        self.store.append_audit_event(
+                            experiment_id, "DATA_INTEGRITY_VIOLATION",
+                            {"reason": f"Price {p_name}={p_val} must be finite positive."}
+                        )
+                        self.store.append_audit_event(
+                            experiment_id, "DATA_UNAVAILABLE",
+                            {"reason": "Invalid non-positive or non-finite price."}
+                        )
+                        self.store.update_status(experiment_id, "FAILED")
+                        if exp_def:
+                            exp_def.status = ExperimentStatus.FAILED
+                            self.store.save_experiment(exp_def)
+                        return
+
+                if not (l <= o <= h and l <= c <= h and l <= h):
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_INTEGRITY_VIOLATION",
+                        {"reason": f"OHLC violation for {sym}: O={o}, H={h}, L={l}, C={c}."}
+                    )
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_UNAVAILABLE",
+                        {"reason": "Invalid OHLC bar relationship."}
+                    )
+                    self.store.update_status(experiment_id, "FAILED")
+                    if exp_def:
+                        exp_def.status = ExperimentStatus.FAILED
+                        self.store.save_experiment(exp_def)
+                    return
+
+                if math.isnan(v) or math.isinf(v) or v < 0.0:
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_INTEGRITY_VIOLATION",
+                        {"reason": f"Volume={v} must be non-negative finite."}
+                    )
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_UNAVAILABLE",
+                        {"reason": "Invalid negative volume."}
+                    )
+                    self.store.update_status(experiment_id, "FAILED")
+                    if exp_def:
+                        exp_def.status = ExperimentStatus.FAILED
+                        self.store.save_experiment(exp_def)
+                    return
+
+            # Validate symbol coverage
+            reg_syms_upper = {s.upper() for s in reg_ds.symbols}
+            for sym in repro.universe:
+                if sym.upper() not in reg_syms_upper:
+                    self.store.append_audit_event(
+                        experiment_id, "MISSING_SYMBOL",
+                        {"requested_symbol": sym, "declared_symbols": reg_ds.symbols}
+                    )
+                    self.store.append_audit_event(
+                        experiment_id, "DATA_UNAVAILABLE",
+                        {"dataset_id": req_dataset_id, "reason": f"Requested symbol '{sym}' missing from dataset coverage."}
+                    )
+                    self.store.update_status(experiment_id, "FAILED")
+                    if exp_def:
+                        exp_def.status = ExperimentStatus.FAILED
+                        self.store.save_experiment(exp_def)
+                    return
 
             all_bars: Dict[str, List[Dict[str, Any]]] = {}
             for sym in repro.universe:
