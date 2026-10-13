@@ -52,6 +52,7 @@ class AutonomousResearchBot:
         ]
         self.dispatcher = WebhookDispatcher()
         self.decisions_dir = os.path.join(PROJECT_ROOT, "data", "decisions")
+        self.intel_db_path = os.path.join(PROJECT_ROOT, "data", "market_intelligence.db")
         os.makedirs(self.decisions_dir, exist_ok=True)
 
     # -------------------------------------------------------------
@@ -350,6 +351,22 @@ class AutonomousResearchBot:
         now_utc = datetime.now(timezone.utc)
         gen_ts = now_utc.isoformat()
         decision_id = f"dec_{today_str}_{uuid.uuid4().hex[:8]}"
+
+        # Quantamental Stock Selection & Universe Stratification
+        stock_selection_data = None
+        try:
+            from services.market_intelligence.stock_decision_engine import StockDecisionEngine
+            stock_engine = StockDecisionEngine()
+            stock_manifest = stock_engine.run_stock_selection(candidate_symbols=self.universe)
+            stock_selection_data = {
+                "top_picks": stock_manifest.top_picks,
+                "approved_portfolio": stock_manifest.selected_portfolio,
+                "excluded_portfolio": stock_manifest.excluded_portfolio,
+                "narrative": stock_manifest.narrative,
+            }
+        except Exception as e:
+            logger.warning(f"Stock selection integration failed: {e}")
+
         decision_manifest = {
             "schema_version": "1.0.0",
             "decision_id": decision_id,
@@ -369,6 +386,7 @@ class AutonomousResearchBot:
             "code_version": "1.0.0",
             "allocation_reason": decision_reason,
             "candidate_evaluations": ranked,
+            "stock_selection": stock_selection_data,
             "eod_audit": eod_diagnosis,
         }
 
@@ -378,6 +396,9 @@ class AutonomousResearchBot:
             json.dump(decision_manifest, f, indent=2)
 
         logger.info(f"Autonomous Decision Manifest written to {manifest_path}")
+
+        # Persist to SQLite Database
+        self._persist_to_database(decision_manifest)
 
         # Dispatch Webhook Notification
         self.dispatcher.notify(
@@ -394,6 +415,52 @@ class AutonomousResearchBot:
         )
 
         return decision_manifest
+
+    def _persist_to_database(self, decision_manifest: Dict[str, Any]):
+        """Persists research decision to SQLite database."""
+        try:
+            dec_date = decision_manifest.get("decision_date", datetime.now(timezone.utc).isoformat())[:10]
+            with sqlite3.connect(self.intel_db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS research_strategy_decisions (
+                        decision_date TEXT PRIMARY KEY,
+                        target_session_date TEXT NOT NULL,
+                        evaluated_at TEXT NOT NULL,
+                        market_regime TEXT NOT NULL,
+                        selected_strategy TEXT NOT NULL,
+                        risk_multiplier REAL NOT NULL,
+                        allocation_reason TEXT NOT NULL,
+                        candidate_evaluations_json TEXT NOT NULL,
+                        stock_selection_json TEXT,
+                        eod_audit_json TEXT,
+                        decision_manifest_json TEXT NOT NULL
+                    )
+                """)
+                cur.execute("""
+                    INSERT OR REPLACE INTO research_strategy_decisions (
+                        decision_date, target_session_date, evaluated_at, market_regime,
+                        selected_strategy, risk_multiplier, allocation_reason,
+                        candidate_evaluations_json, stock_selection_json, eod_audit_json,
+                        decision_manifest_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    dec_date,
+                    decision_manifest.get("target_session_date", ""),
+                    decision_manifest.get("decision_date", datetime.now(timezone.utc).isoformat()),
+                    decision_manifest.get("market_regime", "UNKNOWN"),
+                    decision_manifest.get("selected_strategy", "WAIT"),
+                    float(decision_manifest.get("risk_multiplier", 1.0)),
+                    decision_manifest.get("allocation_reason", ""),
+                    json.dumps(decision_manifest.get("candidate_evaluations", [])),
+                    json.dumps(decision_manifest.get("stock_selection", {})),
+                    json.dumps(decision_manifest.get("eod_audit", {})),
+                    json.dumps(decision_manifest),
+                ))
+                conn.commit()
+            logger.info("Autonomous Decision Manifest persisted to market_intelligence.db")
+        except Exception as e:
+            logger.warning(f"Failed to persist research decision to database: {e}")
 
     def run_eod_research_cycle(self) -> Dict[str, Any]:
         """Executes full autonomous EOD research & decision cycle."""
