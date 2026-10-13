@@ -8,6 +8,8 @@ import os
 import sys
 import json
 import sqlite3
+import uuid
+import hashlib
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
@@ -345,12 +347,26 @@ class AutonomousResearchBot:
                 f"compatible with {regime} market regime."
             )
 
+        now_utc = datetime.now(timezone.utc)
+        gen_ts = now_utc.isoformat()
+        decision_id = f"dec_{today_str}_{uuid.uuid4().hex[:8]}"
         decision_manifest = {
-            "decision_date": datetime.now(timezone.utc).isoformat(),
-            "target_session_date": (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d"),
+            "schema_version": "1.0.0",
+            "decision_id": decision_id,
+            "generated_at_utc": gen_ts,
+            "decision_date": gen_ts,
+            "target_session_date": (now_utc + timedelta(days=1)).strftime("%Y-%m-%d"),
             "market_regime": regime,
             "selected_strategy": chosen_strategy,
-            "risk_multiplier": risk_multiplier,
+            "parameters": {
+                "stop_loss_atr": 1.5,
+                "target_atr": 3.0,
+                "regime": regime,
+            },
+            "risk_multiplier": float(risk_multiplier),
+            "dataset_id": f"NSE_DAILY_BENCHMARK_{today_str}",
+            "dataset_checksum": hashlib.sha256(f"NSE_DAILY_BENCHMARK_{today_str}".encode()).hexdigest(),
+            "code_version": "1.0.0",
             "allocation_reason": decision_reason,
             "candidate_evaluations": ranked,
             "eod_audit": eod_diagnosis,

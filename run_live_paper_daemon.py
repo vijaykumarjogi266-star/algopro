@@ -12,6 +12,7 @@ Runs a persistent real-time loop:
 import sys
 import os
 import sqlite3
+import json
 import time
 import math
 from enum import Enum
@@ -76,25 +77,79 @@ def get_daemon_phase(
 def validate_manifest(
     manifest: Optional[dict],
     current_session_date: str,
+    now_dt: Optional[datetime] = None,
+    max_age_seconds: float = 86400.0,
 ) -> Tuple[bool, Optional[str]]:
     """Validate Strategy Allocation Manifest.
 
+    Producer/consumer schema:
+      schema_version, decision_id, generated_at_utc, target_session_date,
+      selected_strategy, parameters, risk_multiplier, dataset_id,
+      dataset_checksum, code_version.
+
     Checks:
-    1. Manifest is present and selected_strategy != 'WAIT'.
-    2. risk_multiplier is finite and > 0.
-    3. Target session date matches current trading session date exactly.
+    1. Manifest is present and a dict.
+    2. Selected strategy is present and != 'WAIT'.
+    3. risk_multiplier is finite, non-negative, and bounded (0.0 < rm <= 5.0).
+    4. Target session date matches current trading session date exactly.
+    5. generated_at_utc (or decision_date) is timezone-aware.
+    6. generated_at_utc is not unreasonably in the future (> now + 300s).
+    7. generated_at_utc is not stale (> max_age_seconds, e.g. 24h).
+    8. If full schema is provided, parameters must be a dict.
     """
     if not manifest or not isinstance(manifest, dict):
         return False, "Missing or non-dict manifest"
+
     strat = manifest.get("selected_strategy")
     if not strat or strat == "WAIT":
         return False, f"Strategy is WAIT or empty: {strat}"
+
     rm = manifest.get("risk_multiplier")
     if not isinstance(rm, (int, float)) or not math.isfinite(rm) or rm <= 0:
         return False, f"Invalid risk multiplier: {rm}"
+    if rm > 5.0:
+        return False, f"Risk multiplier exceeds upper bound (<= 5.0): {rm}"
+
     target_date = manifest.get("target_session_date") or manifest.get("session_date") or manifest.get("date")
     if not target_date or target_date != current_session_date:
         return False, f"Target session date '{target_date}' does not match current session '{current_session_date}'"
+
+    # Timestamp freshness and timezone awareness
+    gen_raw = manifest.get("generated_at_utc") or manifest.get("decision_date")
+    if gen_raw is not None:
+        try:
+            if isinstance(gen_raw, datetime):
+                gen_dt = gen_raw
+            else:
+                gen_dt = datetime.fromisoformat(str(gen_raw).replace("Z", "+00:00"))
+        except Exception as e:
+            return False, f"Malformed generated_at_utc timestamp: {e}"
+
+        if gen_dt.tzinfo is None or gen_dt.tzinfo.utcoffset(gen_dt) is None:
+            return False, "Generation timestamp must be timezone-aware UTC (naive rejected)"
+
+        ref_now = now_dt if now_dt is not None else datetime.now(timezone.utc)
+        if ref_now.tzinfo is None:
+            ref_now = ref_now.replace(tzinfo=timezone.utc)
+
+        # Future timestamp check (tolerance 300s)
+        if gen_dt > ref_now + timedelta(seconds=300):
+            return False, f"Generation timestamp is unreasonably in the future: {gen_dt.isoformat()}"
+
+        # Staleness check
+        age_seconds = (ref_now - gen_dt).total_seconds()
+        if age_seconds > max_age_seconds:
+            return False, f"Generation timestamp is expired/stale ({age_seconds:.0f}s > {max_age_seconds:.0f}s)"
+
+    # If full provenance schema fields are present, validate them
+    if "schema_version" in manifest or "decision_id" in manifest:
+        if gen_raw is None:
+            return False, "Missing required generated_at_utc in provenance manifest"
+        if not manifest.get("decision_id"):
+            return False, "Missing decision_id in provenance manifest"
+        if "parameters" in manifest and not isinstance(manifest["parameters"], dict):
+            return False, "Manifest parameters must be a dictionary"
+
     return True, None
 
 
@@ -400,6 +455,9 @@ class DaemonController:
         self.trade_targets = {}
         self.trade_entry_times = {}
         self.last_valid_quotes: Dict[str, float] = {}
+        self.last_valid_quotes_meta: Dict[str, dict] = {}
+        self.has_unresolved_square_off = False
+        self.processed_decision_ids = set()
 
         self._is_emergency_halted = False
         self._emergency_halt_reason: Optional[str] = None
@@ -443,38 +501,88 @@ class DaemonController:
 
     def square_off_open_positions(
         self,
-        market_prices: Optional[Dict[str, float]] = None,
+        market_prices: Optional[Dict[str, Any]] = None,
+        current_time: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """Square off open intraday paper positions using last available valid quotes.
+        """Square off open intraday paper positions using valid, fresh quotes.
 
-        Principle: If market closed or no valid quote exists, log error rather than inventing synthetic quotes.
+        Principle: If market closed, quote stale, future, or offline:
+        - persist unresolved square-off state;
+        - retain open positions;
+        - emit critical alert;
+        - retry via documented recovery;
+        - never report liquidation success on failure.
         """
         prices = market_prices or {}
         squared_off = []
         errors = []
+        ref_time = get_ist_now(current_time)
 
         if not self.session or not self.session.portfolio.positions:
-            return {"squared_off": squared_off, "errors": errors, "remaining": 0}
+            self.has_unresolved_square_off = False
+            save_sentinel_state(
+                self.db_path,
+                "unresolved_square_off",
+                0.0,
+                session_date=self.current_session_date,
+                text_value="",
+            )
+            return {
+                "status": "COMPLETED",
+                "squared_off": squared_off,
+                "errors": errors,
+                "remaining": 0,
+                "unresolved": False,
+            }
 
         for sym, pos in list(self.session.portfolio.positions.items()):
             if pos.quantity <= 0:
                 continue
 
             sym_key = sym.upper()
-            quote_price = (
-                prices.get(sym)
-                or prices.get(sym_key)
-                or self.last_valid_quotes.get(sym)
-                or self.last_valid_quotes.get(sym_key)
-            )
+            quote_raw = prices.get(sym) or prices.get(sym_key)
+            
+            quote_price = None
+            quote_ts = None
+            is_stale_flag = False
 
-            if (
-                quote_price is None
-                or not isinstance(quote_price, (int, float))
-                or not math.isfinite(quote_price)
-                or quote_price <= 0
-            ):
+            if isinstance(quote_raw, dict):
+                if quote_raw.get("status") in ("ERROR", "OFFLINE", "STALE") or quote_raw.get("is_stale") is True:
+                    is_stale_flag = True
+                quote_price = quote_raw.get("price")
+                quote_ts = quote_raw.get("timestamp") or quote_raw.get("bar_timestamp")
+            elif isinstance(quote_raw, (int, float)):
+                quote_price = float(quote_raw)
+            elif quote_raw is None:
+                cached_meta = self.last_valid_quotes_meta.get(sym) or self.last_valid_quotes_meta.get(sym_key)
+                if cached_meta:
+                    quote_price = cached_meta.get("price")
+                    quote_ts = cached_meta.get("timestamp")
+                else:
+                    quote_price = self.last_valid_quotes.get(sym) or self.last_valid_quotes.get(sym_key)
+
+            err_msg = None
+            if is_stale_flag:
+                err_msg = f"Cannot square off {sym}: no valid quote available (stale or offline). Refusing to invent synthetic quote."
+            elif quote_price is None or not isinstance(quote_price, (int, float)) or not math.isfinite(quote_price) or quote_price <= 0:
                 err_msg = f"Cannot square off {sym}: no valid quote available. Refusing to invent synthetic quote."
+            elif quote_ts is not None:
+                if isinstance(quote_ts, datetime):
+                    q_dt = quote_ts
+                else:
+                    try:
+                        q_dt = datetime.fromisoformat(str(quote_ts).replace("Z", "+00:00"))
+                    except Exception:
+                        q_dt = None
+                if q_dt is not None:
+                    if q_dt.tzinfo is None:
+                        q_dt = q_dt.replace(tzinfo=ref_time.tzinfo or IST_TZ)
+                    if q_dt > ref_time + timedelta(seconds=60):
+                        err_msg = f"Cannot square off {sym}: no valid quote available (future timestamp {q_dt} relative to {ref_time}). Refusing to invent synthetic quote."
+                    elif (ref_time - q_dt).total_seconds() > 900:
+                        err_msg = f"Cannot square off {sym}: no valid quote available (stale quote timestamp {q_dt} >900s old). Refusing to invent synthetic quote."
+
+            if err_msg:
                 log_msg(f"[ERROR] {err_msg}")
                 errors.append({"symbol": sym, "error": err_msg})
                 continue
@@ -503,11 +611,49 @@ class DaemonController:
                 log_msg(f"[ERROR] {err_msg}")
                 errors.append({"symbol": sym, "error": err_msg})
 
-        return {
-            "squared_off": squared_off,
-            "errors": errors,
-            "remaining": len(self.session.portfolio.positions),
-        }
+        rem_positions = len(self.session.portfolio.positions)
+        if errors or rem_positions > 0:
+            self.has_unresolved_square_off = True
+            save_sentinel_state(
+                self.db_path,
+                "unresolved_square_off",
+                1.0,
+                session_date=self.current_session_date,
+                text_value=json.dumps(errors),
+            )
+            log_msg(f"[CRITICAL ALERT] Unresolved square-off persisted: {len(errors)} error(s), {rem_positions} remaining position(s).")
+            self.sentinel.dispatcher.notify(
+                title="CRITICAL: Unresolved Square-Off",
+                message=f"Mandatory square-off incomplete. Positions retained: {rem_positions}. Errors: {errors}",
+                level="CRITICAL",
+                fields={
+                    "Remaining Positions": str(rem_positions),
+                    "Errors": str(errors),
+                },
+            )
+            return {
+                "status": "UNRESOLVED",
+                "squared_off": squared_off,
+                "errors": errors,
+                "remaining": rem_positions,
+                "unresolved": True,
+            }
+        else:
+            self.has_unresolved_square_off = False
+            save_sentinel_state(
+                self.db_path,
+                "unresolved_square_off",
+                0.0,
+                session_date=self.current_session_date,
+                text_value="",
+            )
+            return {
+                "status": "COMPLETED",
+                "squared_off": squared_off,
+                "errors": [],
+                "remaining": 0,
+                "unresolved": False,
+            }
 
     def initialize_session(
         self,
@@ -556,6 +702,19 @@ class DaemonController:
             self._is_emergency_halted = True
             self._emergency_halt_reason = state["emergency_halt"].get("text_value") or "PERSISTED_EMERGENCY_HALT"
 
+        # Restore unresolved square-off state
+        if "unresolved_square_off" in state and float(state["unresolved_square_off"].get("value", 0)) > 0:
+            self.has_unresolved_square_off = True
+            log_msg("[RESTART] Persisted unresolved square-off state detected. Will retry cutoff safely.")
+        else:
+            self.has_unresolved_square_off = False
+
+        # Restore processed decision IDs
+        for k, v in state.items():
+            if k.startswith("decision_") and float(v.get("value", 0)) > 0:
+                dec_id = v.get("text_value") or k.replace("decision_", "")
+                self.processed_decision_ids.add(dec_id)
+
     def on_session_check(
         self,
         current_time: Optional[datetime] = None,
@@ -603,17 +762,6 @@ class DaemonController:
         self.on_session_check(current_time=current_time)
         phase = self.get_phase(ist_now)
 
-        # Check circuit breaker / emergency halt FIRST
-        if self.is_halted:
-            log_msg(f"[HALTED] Daemon trading is paused due to emergency halt: {self.halt_reason}")
-            return {
-                "status": "HALTED",
-                "phase": phase.value,
-                "reason": self.halt_reason,
-                "current_equity": self.session.portfolio.total_equity,
-                "open_positions": len(self.session.portfolio.positions),
-            }
-
         results = scan_results or {}
         if scan_results is None:
             for sym in self.universe:
@@ -623,9 +771,12 @@ class DaemonController:
         for sym, data in results.items():
             if data.get("status") == "OK" and "price" in data:
                 price_val = data["price"]
+                bar_ts = data.get("bar_timestamp") or ist_now
                 market_prices[sym] = price_val
                 self.last_valid_quotes[sym] = price_val
                 self.last_valid_quotes[sym.upper()] = price_val
+                self.last_valid_quotes_meta[sym] = {"price": price_val, "timestamp": bar_ts}
+                self.last_valid_quotes_meta[sym.upper()] = {"price": price_val, "timestamp": bar_ts}
 
         # STEP 1: Mark-to-market EXISTING POSITIONS FIRST with validated fresh data
         if market_prices:
@@ -664,16 +815,18 @@ class DaemonController:
         # STEP 4: Check Sentinel daily drawdown killswitch
         self.sentinel.check_daily_drawdown_killswitch(current_equity)
 
-        # MANDATORY 15:15 IST SQUARE-OFF
+        # MANDATORY 15:15 IST SQUARE-OFF OR UNRESOLVED CUTOFF RETRY
         is_market_day = self.sentinel.is_market_day(ist_now)
         time_minutes = ist_now.hour * 60 + ist_now.minute
         is_square_off_time = is_market_day and time_minutes >= (15 * 60 + 15)
+        has_open_positions = bool(self.session and self.session.portfolio.positions)
 
-        if is_square_off_time:
-            log_msg(f"[EOD] Mandatory 15:15 IST square-off active (IST {ist_now.strftime('%H:%M')}).")
-            square_off_res = self.square_off_open_positions(market_prices=market_prices)
+        if (is_square_off_time or self.has_unresolved_square_off) and has_open_positions:
+            log_msg(f"[CUTOFF] Protective cutoff active (IST {ist_now.strftime('%H:%M')}, unresolved={self.has_unresolved_square_off}).")
+            square_off_res = self.square_off_open_positions(market_prices=results if results else market_prices, current_time=ist_now)
+            status_str = "SQUARE_OFF_COMPLETED" if (not square_off_res.get("unresolved") and not square_off_res.get("errors")) else "SQUARE_OFF_PARTIAL"
             return {
-                "status": "SQUARE_OFF_COMPLETED" if not square_off_res["errors"] else "SQUARE_OFF_PARTIAL",
+                "status": status_str,
                 "phase": phase.value,
                 "current_equity": self.session.portfolio.total_equity,
                 "daily_loss_pct": risk_state["daily_loss_pct"],
@@ -682,6 +835,49 @@ class DaemonController:
                 "open_positions": len(self.session.portfolio.positions),
                 "squared_off": square_off_res["squared_off"],
                 "square_off_errors": square_off_res["errors"],
+                "unresolved": square_off_res.get("unresolved", False),
+            }
+        elif self.has_unresolved_square_off and not has_open_positions:
+            self.has_unresolved_square_off = False
+            save_sentinel_state(self.db_path, "unresolved_square_off", 0.0, session_date=self.current_session_date, text_value="")
+
+        # Check circuit breaker / emergency halt (Entry halt NEVER skips protective exits!)
+        if self.is_halted:
+            # Manage active positions (protective exits: SL / TP) even during entry halt
+            for sym, data in results.items():
+                if data.get("status") != "OK":
+                    continue
+                sym_key = sym.upper()
+                pos = self.session.portfolio.positions.get(sym_key)
+                if pos and pos.quantity > 0:
+                    current_sl = self.trade_stops.get(sym_key, pos.average_entry_price * 0.98)
+                    current_tp = self.trade_targets.get(sym_key, pos.average_entry_price * 1.03)
+                    low_eval = data.get("low", data["price"])
+                    high_eval = data.get("high", data["price"])
+                    if low_eval <= current_sl or high_eval >= current_tp:
+                        exit_price = current_sl if low_eval <= current_sl else current_tp
+                        order, fill = self.paper_engine.submit_manual_order(
+                            session_id=self.session.session_id,
+                            symbol=sym,
+                            side=OrderSide.SELL,
+                            quantity=pos.quantity,
+                            price=exit_price,
+                        )
+                        self.session = self.paper_engine.get_session(self.session.session_id)
+                        self.trade_stops.pop(sym_key, None)
+                        self.trade_targets.pop(sym_key, None)
+                        self.trade_entry_times.pop(sym_key, None)
+
+            log_msg(f"[HALTED] Daemon trading is paused due to emergency halt: {self.halt_reason}")
+            return {
+                "status": "HALTED",
+                "phase": phase.value,
+                "reason": self.halt_reason,
+                "current_equity": self.session.portfolio.total_equity,
+                "daily_loss_pct": risk_state["daily_loss_pct"],
+                "drawdown_pct": risk_state["drawdown_pct"],
+                "high_water_mark": self.high_water_mark,
+                "open_positions": len(self.session.portfolio.positions),
             }
 
         # If not regular trading phase (e.g. PREMARKET or MAINTENANCE), do not enter trades
@@ -744,57 +940,71 @@ class DaemonController:
 
         # STEP 6: Check Strategy Allocation Manifest before admitting any BUY orders
         manifest = self.sentinel.get_latest_strategy_decision(current_ist_date=self.current_session_date)
-        is_manifest_valid, _ = validate_manifest(manifest, self.current_session_date)
+        is_manifest_valid, manifest_err = validate_manifest(manifest, self.current_session_date, now_dt=ist_now)
+        dec_id = manifest.get("decision_id") if manifest else None
+        if is_manifest_valid and dec_id and dec_id in self.processed_decision_ids:
+            log_msg(f"[MANIFEST] Replayed decision {dec_id} already executed. Suppressing duplicate execution.")
+            is_manifest_valid = False
 
-        # STEP 7: Process BUY signals
-        for sym, data in results.items():
-            if data.get("status") != "OK" or data.get("signal") != "BUY":
-                continue
-            sym_key = sym.upper()
-            price = data["price"]
+        # STEP 7: Process BUY signals driven by selected strategy and parameters
+        if is_manifest_valid and not self.sentinel.is_killswitch_tripped and not self.is_halted:
+            selected_strat = manifest.get("selected_strategy", "strat_daemon_5x")
+            params = manifest.get("parameters", {}) if isinstance(manifest.get("parameters"), dict) else {}
+            risk_mult = float(manifest.get("risk_multiplier", 1.0))
+            sl_atr_mult = float(params.get("stop_loss_atr", 1.5))
+            tp_atr_mult = float(params.get("target_atr", 3.0))
 
-            if not is_manifest_valid:
-                continue
-            if self.sentinel.is_killswitch_tripped:
-                continue
-            if self.is_halted:
-                continue
-            if len(self.session.portfolio.positions) >= self.risk_limits.max_open_positions:
-                continue
+            for sym, data in results.items():
+                if data.get("status") != "OK" or data.get("signal") != "BUY":
+                    continue
+                sym_key = sym.upper()
+                price = data["price"]
 
-            risk_mult = manifest.get("risk_multiplier", 1.0)
-            risk_per_trade = self.initial_capital * 0.05 * risk_mult
-            stop_dist = max(price - data.get("stop_loss", price * 0.98), data.get("atr", price * 0.01))
-            shares = int(risk_per_trade / stop_dist) if stop_dist > 0 else 1
-            max_shares = int((min(current_equity, self.buying_power) * 0.19) / price)
-            shares = max(1, min(shares, max_shares))
+                if len(self.session.portfolio.positions) >= self.risk_limits.max_open_positions:
+                    continue
 
-            eval_res = self.risk_engine.evaluate(
-                symbol=sym,
-                price=price,
-                proposed_quantity=shares,
-                stop_loss=data.get("stop_loss"),
-                current_portfolio_value=current_equity,
-                current_daily_loss_pct=risk_state["daily_loss_pct"],
-                current_drawdown_pct=risk_state["drawdown_pct"],
-                current_open_positions_count=len(self.session.portfolio.positions),
-                context={"historical_returns": data.get("historical_returns", [0.01] * 25)},
-            )
+                risk_per_trade = self.initial_capital * 0.05 * risk_mult
+                stop_dist = max(price - data.get("stop_loss", price * 0.98), data.get("atr", price * 0.01) * sl_atr_mult)
+                shares = int(risk_per_trade / stop_dist) if stop_dist > 0 else 1
+                max_shares = int((min(current_equity, self.buying_power) * 0.19) / price)
+                shares = max(1, min(shares, max_shares))
 
-            if eval_res.is_approved:
-                order, fill = self.paper_engine.submit_manual_order(
-                    session_id=self.session.session_id,
+                eval_res = self.risk_engine.evaluate(
                     symbol=sym,
-                    side=OrderSide.BUY,
-                    quantity=eval_res.approved_quantity,
                     price=price,
+                    proposed_quantity=shares,
                     stop_loss=data.get("stop_loss"),
+                    current_portfolio_value=current_equity,
+                    current_daily_loss_pct=risk_state["daily_loss_pct"],
+                    current_drawdown_pct=risk_state["drawdown_pct"],
+                    current_open_positions_count=len(self.session.portfolio.positions),
+                    context={"historical_returns": data.get("historical_returns", [0.01] * 25)},
                 )
-                self.session = self.paper_engine.get_session(self.session.session_id)
-                if fill:
-                    self.trade_stops[sym_key] = data.get("stop_loss")
-                    self.trade_targets[sym_key] = data.get("target")
-                    self.trade_entry_times[sym_key] = ist_now
+
+                if eval_res.is_approved:
+                    order, fill = self.paper_engine.submit_manual_order(
+                        session_id=self.session.session_id,
+                        symbol=sym,
+                        side=OrderSide.BUY,
+                        quantity=eval_res.approved_quantity,
+                        price=price,
+                        stop_loss=data.get("stop_loss"),
+                    )
+                    self.session = self.paper_engine.get_session(self.session.session_id)
+                    if fill:
+                        self.session.strategy_id = selected_strat
+                        self.trade_stops[sym_key] = data.get("stop_loss")
+                        self.trade_targets[sym_key] = data.get("target")
+                        self.trade_entry_times[sym_key] = ist_now
+                        if dec_id:
+                            self.processed_decision_ids.add(dec_id)
+                            save_sentinel_state(
+                                self.db_path,
+                                f"decision_{dec_id}",
+                                1.0,
+                                session_date=self.current_session_date,
+                                text_value=dec_id,
+                            )
 
         return {
             "status": "OK",
@@ -844,19 +1054,6 @@ def main():
     while running:
         cycle += 1
 
-        is_online, net_changed, outage_dur = net_guard.probe()
-        if net_changed and not is_online:
-            log_msg("[NETWORK ALERT] WAN connection lost. Freezing trade proposals.")
-        elif net_changed and is_online:
-            log_msg(f"[NETWORK RECOVERED] WAN connectivity restored after {outage_dur:.1f}s.")
-
-        if not is_online:
-            for _ in range(SCAN_INTERVAL_SECONDS):
-                if not running:
-                    break
-                time.sleep(1)
-            continue
-
         now_ist = get_ist_now()
         ist_hour = now_ist.hour
         ist_minute = now_ist.minute
@@ -864,16 +1061,7 @@ def main():
         is_market_day = controller.sentinel.is_market_day(now_ist)
         is_market_open = is_market_day and (phase == DaemonPhase.REGULAR or phase == DaemonPhase.POST_MARKET_EOD)
 
-        if controller.is_halted:
-            if cycle % 10 == 1:
-                log_msg(f"[HALTED] Daemon trading paused due to emergency halt: {controller.halt_reason}")
-            for _ in range(SCAN_INTERVAL_SECONDS):
-                if not running:
-                    break
-                time.sleep(1)
-            continue
-
-        # Scheduled pre-market maintenance
+        # 1. Scheduled pre-market maintenance (08:30 IST) - LOCAL, executed before WAN / entry gating
         if ist_hour == 8 and 30 <= ist_minute <= 35:
             if not getattr(controller.sentinel, "_premarket_executed_today", False):
                 controller.sentinel.execute_pre_market_maintenance()
@@ -881,7 +1069,7 @@ def main():
         elif ist_hour != 8:
             controller.sentinel._premarket_executed_today = False
 
-        # Scheduled post-market EOD audit
+        # 2. Scheduled post-market EOD audit (15:35 IST) - LOCAL, executed before WAN / entry gating
         if ist_hour == 15 and 35 <= ist_minute < 40:
             if not getattr(controller.sentinel, "_eod_dispatched_today", False):
                 pos_dict = {
@@ -892,22 +1080,36 @@ def main():
                         "cost_basis": pos.cost_basis,
                     }
                     for sym, pos in controller.session.portfolio.positions.items()
-                }
+                } if controller.session else {}
                 controller.sentinel.execute_eod_reconciliation_and_tearsheet(
-                    portfolio_equity=controller.session.portfolio.total_equity,
-                    open_positions_count=len(controller.session.portfolio.positions),
-                    cash=controller.session.portfolio.cash,
-                    realized_pnl=controller.session.portfolio.total_realized_pnl,
-                    total_fees=controller.session.portfolio.total_fees_paid,
-                    total_slippage=controller.session.portfolio.total_slippage_paid,
+                    portfolio_equity=controller.session.portfolio.total_equity if controller.session else controller.buying_power,
+                    open_positions_count=len(controller.session.portfolio.positions) if controller.session else 0,
+                    cash=controller.session.portfolio.cash if controller.session else controller.buying_power,
+                    realized_pnl=controller.session.portfolio.total_realized_pnl if controller.session else 0.0,
+                    total_fees=controller.session.portfolio.total_fees_paid if controller.session else 0.0,
+                    total_slippage=controller.session.portfolio.total_slippage_paid if controller.session else 0.0,
                     positions=pos_dict,
                 )
                 controller.sentinel._eod_dispatched_today = True
         elif ist_hour != 15:
             controller.sentinel._eod_dispatched_today = False
 
-        # Standby mode outside market hours
-        if not is_market_open:
+        # 3. WAN connectivity probe
+        is_online, net_changed, outage_dur = net_guard.probe()
+        if net_changed and not is_online:
+            log_msg("[NETWORK ALERT] WAN connection lost. Freezing new entries; protective exits remain active.")
+        elif net_changed and is_online:
+            log_msg(f"[NETWORK RECOVERED] WAN connectivity restored after {outage_dur:.1f}s.")
+
+        # Cutoff check: determine if cutoff or unresolved square-off is active
+        time_minutes = ist_hour * 60 + ist_minute
+        is_square_off_time = is_market_day and time_minutes >= (15 * 60 + 15)
+        has_unresolved_cutoff = controller.has_unresolved_square_off or (
+            is_square_off_time and controller.session and bool(controller.session.portfolio.positions)
+        )
+
+        # Standby mode outside market hours (unless cutoff handling is active)
+        if not is_market_open and not has_unresolved_cutoff:
             if cycle % 10 == 1:
                 status_str = "NSE market closed" if is_market_day else "Weekend / NSE holiday"
                 log_msg(f"[STANDBY] {status_str} (IST {ist_hour:02d}:{ist_minute:02d}).")
@@ -917,7 +1119,15 @@ def main():
                 time.sleep(1)
             continue
 
-        # Execute cycle
+        # If WAN is offline, freeze new entries but still run cycle if protective exits / cutoffs are pending
+        if not is_online and not has_unresolved_cutoff:
+            for _ in range(SCAN_INTERVAL_SECONDS):
+                if not running:
+                    break
+                time.sleep(1)
+            continue
+
+        # Execute cycle (controller.run_cycle handles cutoff and halts without skipping protective exits)
         log_msg(f"--- Cycle #{cycle}: Active Market Scan (IST {ist_hour:02d}:{ist_minute:02d}) ---")
         summary = controller.run_cycle(current_time=now_ist)
         log_msg(f"Portfolio Status: Equity=INR {summary.get('current_equity', 0):,.2f} | Open Positions={summary.get('open_positions', 0)}")
