@@ -128,6 +128,17 @@ class PaperPortfolio(BaseModel):
         self.day_start_equity = eq
         self.daily_pnl = 0.0
 
+    @property
+    def daily_loss_pct(self) -> float:
+        """Fraction of day-start equity lost today (0.0 = no loss). Enforces current daily loss from portfolio state."""
+        baseline = self.day_start_equity if self.day_start_equity > 0 else self.initial_capital
+        if baseline <= 0:
+            return 0.0
+        current_eq = self.total_equity
+        if current_eq < baseline:
+            return round((baseline - current_eq) / baseline, 6)
+        return 0.0
+
     def _update_pnl_and_hwm(self):
         current_eq = self.total_equity
         if self.high_water_mark <= 0.0 and self.peak_equity > 0.0:
@@ -162,19 +173,23 @@ class PaperPortfolio(BaseModel):
     def on_fill(self, fill: ExecutionFill):
         """Applies an execution fill to the portfolio maintaining financial accounting invariants.
         
-        Slippage arithmetic:
-        - Deducted once on cash flow (cash outflow = quantity * base_price + transaction_costs + slippage_cost).
-        - Not double-counted inside position cost basis (cost basis = quantity * base_price).
+        Fill-price-consistent accounting:
+        - BUY cash debit = quantity * fill_price + fees.
+        - SELL cash credit = quantity * fill_price - fees.
+        - Slippage attribution = abs(fill_price - reference_price) * quantity (tracked as attribution metric, NOT deducted a second time from cash).
+        - Mark-to-market uses independently supplied market mark (not slipped fill price).
+        - Gross realized PnL = quantity * (sell_price - buy_price). Net realized PnL = gross - fees.
         """
         sym = fill.symbol.upper()
+        ref_price = getattr(fill, "base_price", fill.fill_price)
+        slip_cost = fill.slippage_cost if getattr(fill, "slippage_cost", None) is not None else round(abs(fill.fill_price - ref_price) * fill.quantity, 4)
+
         self.total_fees_paid = round(self.total_fees_paid + fill.transaction_costs, 4)
-        self.total_slippage_paid = round(self.total_slippage_paid + fill.slippage_cost, 4)
+        self.total_slippage_paid = round(self.total_slippage_paid + slip_cost, 4)
         self.lifetime_trades += 1
 
-        base_price = getattr(fill, "base_price", fill.fill_price)
-
         if fill.side == OrderSide.BUY:
-            total_outflow = round((fill.quantity * base_price) + fill.transaction_costs + fill.slippage_cost, 4)
+            total_outflow = round((fill.quantity * fill.fill_price) + fill.transaction_costs, 4)
             if self.cash < total_outflow:
                 raise ValueError(
                     f"Defensive cash invariant violation: Available cash INR {self.cash:.2f} "
@@ -188,35 +203,34 @@ class PaperPortfolio(BaseModel):
                     symbol=sym,
                     side=OrderSide.BUY,
                     quantity=fill.quantity,
-                    average_entry_price=base_price,
-                    current_price=fill.fill_price,
-                    cost_basis=round(fill.quantity * base_price, 4),
-                    market_value=round(fill.quantity * fill.fill_price, 4),
+                    average_entry_price=fill.fill_price,
+                    current_price=ref_price,
+                    cost_basis=round(fill.quantity * fill.fill_price, 4),
+                    market_value=round(fill.quantity * ref_price, 4),
                     fees_paid=fill.transaction_costs,
-                    slippage_paid=fill.slippage_cost,
+                    slippage_paid=slip_cost,
                 )
             else:
                 # Average into existing long
                 new_qty = pos.quantity + fill.quantity
-                new_cost = pos.cost_basis + (fill.quantity * base_price)
+                new_cost = pos.cost_basis + (fill.quantity * fill.fill_price)
                 pos.average_entry_price = round(new_cost / new_qty, 4)
                 pos.quantity = new_qty
                 pos.cost_basis = round(new_cost, 4)
-                pos.market_value = round(new_qty * fill.fill_price, 4)
-                pos.current_price = fill.fill_price
+                pos.market_value = round(new_qty * pos.current_price, 4)
                 pos.fees_paid = round(pos.fees_paid + fill.transaction_costs, 4)
-                pos.slippage_paid = round(pos.slippage_paid + fill.slippage_cost, 4)
+                pos.slippage_paid = round(pos.slippage_paid + slip_cost, 4)
         else:
             # SELL side (closing or reducing long)
             pos = self.positions.get(sym)
             if pos is not None and pos.quantity > 0:
                 closed_qty = min(pos.quantity, fill.quantity)
                 cost_of_closed = closed_qty * pos.average_entry_price
-                proceeds = closed_qty * base_price
+                proceeds = closed_qty * fill.fill_price
                 realized_gross = proceeds - cost_of_closed
                 self.total_realized_pnl = round(self.total_realized_pnl + realized_gross, 4)
 
-                net_inflow = (fill.quantity * base_price) - fill.slippage_cost - fill.transaction_costs
+                net_inflow = (fill.quantity * fill.fill_price) - fill.transaction_costs
                 self.cash = round(self.cash + net_inflow, 4)
 
                 rem_qty = pos.quantity - closed_qty
@@ -225,11 +239,9 @@ class PaperPortfolio(BaseModel):
                 else:
                     pos.quantity = rem_qty
                     pos.cost_basis = round(rem_qty * pos.average_entry_price, 4)
-                    pos.market_value = round(rem_qty * fill.fill_price, 4)
-                    pos.current_price = fill.fill_price
+                    pos.market_value = round(rem_qty * pos.current_price, 4)
             else:
-                # Zero existing position, receive proceeds
-                net_inflow = (fill.quantity * base_price) - fill.slippage_cost - fill.transaction_costs
+                net_inflow = (fill.quantity * fill.fill_price) - fill.transaction_costs
                 self.cash = round(self.cash + net_inflow, 4)
 
         self._update_pnl_and_hwm()
@@ -494,7 +506,7 @@ class PaperTradingEngine:
             evaluated = self.lifecycle_manager.evaluate_risk(
                 order,
                 current_portfolio_value=session.portfolio.total_equity,
-                current_daily_loss_pct=0.0,
+                current_daily_loss_pct=session.portfolio.daily_loss_pct,
                 current_drawdown_pct=session.portfolio.max_drawdown_pct,
                 current_open_positions_count=len(session.portfolio.positions),
                 available_cash=session.portfolio.cash,

@@ -7,6 +7,7 @@ and generates deterministic corrective delta orders sorted alphabetically with I
 
 from datetime import datetime, timezone
 import hashlib
+import math
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
@@ -121,7 +122,10 @@ class MultiBrokerReconciliationEngine:
 
             if delta_p != 0:
                 residual_drift_count += 1
-                avg_price = broker_prices.get(sym, 100.0)  # Default price fallback if newly discovered
+                avg_price = broker_prices.get(sym)
+                # Broker-only position without valid price yields unresolved drift, not fabricated price or correction orders
+                if avg_price is None or not isinstance(avg_price, (int, float)) or not math.isfinite(avg_price) or avg_price <= 0.0:
+                    continue
                 order_id = self.generate_canonical_order_id(
                     account_id=account_id,
                     symbol=sym,
@@ -154,7 +158,7 @@ class DoubleEntryLedgerReconciler:
     Double-Entry Financial Accounting Ledger Reconciler.
     Enforces strict mathematical conservation of capital across all portfolio transactions:
     Equity == Cash + Market Value of Open Positions
-    Current Cash == Initial Cash + Sum(Realized PnL) - Sum(Fees) - Sum(Slippage) - Sum(Open Position Cost Basis)
+    Current Cash == Initial Cash + Sum(Realized PnL) - Sum(Fees) - Sum(Open Position Cost Basis)
     """
 
     @staticmethod
@@ -168,23 +172,82 @@ class DoubleEntryLedgerReconciler:
         tolerance: float = 0.01,
     ) -> Tuple[bool, float, Optional[str]]:
         """
-        Audits double-entry invariants against floating-point drift.
+        Audits double-entry invariants against floating-point drift and rejects nonfinite inputs.
         Returns: (is_valid, imbalance_amount, failure_reason).
         """
+        import math
+
+        # Reject nonfinite accounting inputs
+        for name, val in [
+            ("initial_cash", initial_cash),
+            ("current_cash", current_cash),
+            ("total_fees_paid", total_fees_paid),
+            ("total_slippage_paid", total_slippage_paid),
+            ("realized_pnl", realized_pnl),
+            ("tolerance", tolerance),
+        ]:
+            if not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+                return False, float("inf"), f"Nonfinite accounting input detected: {name}={val}"
+
+        for sym, pos in positions.items():
+            for k, v in pos.items():
+                if not isinstance(v, (int, float)) or math.isnan(v) or math.isinf(v):
+                    return False, float("inf"), f"Nonfinite position attribute detected: {sym}.{k}={v}"
+
         total_cost_basis = sum(pos.get("cost_basis", pos.get("quantity", 0) * pos.get("avg_price", 0.0)) for pos in positions.values())
         total_market_val = sum(pos.get("quantity", 0) * pos.get("current_price", 0.0) for pos in positions.values())
 
-        # Expected cash = Initial Cash + Realized PnL - Total Fees - Total Slippage - Net Open Position Outflow
-        expected_cash = initial_cash + realized_pnl - total_fees_paid - total_slippage_paid - total_cost_basis
-        cash_imbalance = abs(current_cash - expected_cash)
+        # Fill-price consistent accounting: cost_basis incorporates fill_price, slippage is attribution only
+        expected_cash_fill = initial_cash + realized_pnl - total_fees_paid - total_cost_basis
+        imbalance_fill = abs(current_cash - expected_cash_fill)
 
-        if cash_imbalance > tolerance:
+        # Legacy separated-slippage accounting (if cost basis used base_price instead of fill_price)
+        expected_cash_legacy = initial_cash + realized_pnl - total_fees_paid - total_slippage_paid - total_cost_basis
+        imbalance_legacy = abs(current_cash - expected_cash_legacy)
+
+        if imbalance_fill <= tolerance:
+            return True, 0.0, None
+        if imbalance_legacy <= tolerance:
+            return True, 0.0, None
+
+        best_imbalance = min(imbalance_fill, imbalance_legacy)
+        return (
+            False,
+            best_imbalance,
+            f"Double-entry cash imbalance detected: Expected INR {expected_cash_fill:.2f}, Actual INR {current_cash:.2f} (Delta: {best_imbalance:.4f})"
+        )
+
+    @staticmethod
+    def audit_lifetime_balance_sheet(
+        initial_capital: float,
+        cash: float,
+        positions_value: float,
+        net_cashflows: float = 0.0,
+        tolerance: float = 0.01,
+    ) -> Tuple[bool, float, Optional[str]]:
+        """
+        Lifetime balance-sheet reconciliation: initial_capital + net_cashflows = cash + positions_value.
+        Rejects nonfinite inputs.
+        """
+        import math
+        for name, val in [
+            ("initial_capital", initial_capital),
+            ("cash", cash),
+            ("positions_value", positions_value),
+            ("net_cashflows", net_cashflows),
+            ("tolerance", tolerance),
+        ]:
+            if not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+                return False, float("inf"), f"Nonfinite balance-sheet input detected: {name}={val}"
+
+        expected_equity = initial_capital + net_cashflows
+        actual_equity = cash + positions_value
+        imbalance = abs(actual_equity - expected_equity)
+        if imbalance > tolerance:
             return (
                 False,
-                cash_imbalance,
-                f"Double-entry cash imbalance detected: Expected INR {expected_cash:.2f}, Actual INR {current_cash:.2f} (Delta: {cash_imbalance:.4f})"
+                imbalance,
+                f"Lifetime balance-sheet imbalance: expected INR {expected_equity:.2f}, actual INR {actual_equity:.2f} (Delta: {imbalance:.4f})"
             )
-
-        expected_equity = current_cash + total_market_val
         return True, 0.0, None
 
