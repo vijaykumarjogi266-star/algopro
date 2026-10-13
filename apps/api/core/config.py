@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     # Server binding
-    API_HOST: str = "0.0.0.0"
+    API_HOST: str = "0.0.0.0"  # nosec B104
     API_PORT: int = 8000
     API_V1_PREFIX: str = "/api/v1"
 

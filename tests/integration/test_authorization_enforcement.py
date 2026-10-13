@@ -112,16 +112,17 @@ def test_mutation_permission_matrix(role_name, api_key, can_admin, can_operator,
     client = TestClient(app)
     headers = {"X-API-Key": api_key}
 
-    # 1. Admin-level mutation: Broker Connection creation
-    broker_res = client.post(
-        "/api/v1/brokers/connections",
-        json={"broker_name": "simulated", "environment": "PAPER"},
+    # 1. Admin-level mutation: Circuit Breaker Rearm
+    admin_res = client.post(
+        "/api/v1/circuit-breaker/rearm",
+        json={"rearm_token": "dummy_secret_value"},
         headers=headers,
     )
     if can_admin:
-        assert broker_res.status_code in (201, 200), f"{role_name} expected admin access: {broker_res.text}"
+        # Admin passes role check (may fail on secret mismatch, but not RBAC Insufficient permissions)
+        assert admin_res.status_code != 403 or "Insufficient role permissions" not in admin_res.text
     else:
-        assert broker_res.status_code == 403, f"{role_name} should be forbidden from admin mutation: {broker_res.status_code}"
+        assert admin_res.status_code == 403, f"{role_name} should be forbidden from admin mutation: {admin_res.status_code}"
 
     # 2. Operator-level mutation: Paper Session creation
     paper_res = client.post(

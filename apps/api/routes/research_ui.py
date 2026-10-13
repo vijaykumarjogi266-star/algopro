@@ -530,6 +530,15 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
           </div>
         </div>
 
+        <div style="margin-bottom: 12px;">
+          <div class="metric-label" style="margin-bottom: 4px;">Research Description & Rationale</div>
+          <div id="detail-desc" style="font-size: 0.85rem; color: var(--text); padding: 8px 12px; background: #0d1117; border: 1px solid var(--card-border); border-radius: 6px;">--</div>
+        </div>
+        <div style="margin-bottom: 16px;">
+          <div class="metric-label" style="margin-bottom: 4px;">Hyperparameters & Notes</div>
+          <pre class="terminal-box" id="detail-params" style="max-height: 120px;">--</pre>
+        </div>
+
         <div style="margin-top: 16px; display: flex; gap: 12px;">
           <button id="btn-submit-run" class="btn btn-primary" onclick="submitCurrentExperimentRun()">
             Submit Backtest Run
@@ -1053,10 +1062,27 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         if (baseSelect && tgtSelect) {
           const prevBase = baseSelect.value;
           const prevTgt = tgtSelect.value;
-          const optsHtml = '<option value="">-- Select Experiment --</option>' +
-            exps.map(e => `<option value="${escapeHtml(e.experiment_id)}">${escapeHtml(e.name)} (${escapeHtml(e.experiment_id)})</option>`).join('');
-          baseSelect.innerHTML = optsHtml;
-          tgtSelect.innerHTML = optsHtml;
+          baseSelect.replaceChildren();
+          tgtSelect.replaceChildren();
+          const defBase = document.createElement('option');
+          defBase.value = '';
+          defBase.textContent = '-- Select Experiment --';
+          const defTgt = document.createElement('option');
+          defTgt.value = '';
+          defTgt.textContent = '-- Select Experiment --';
+          baseSelect.appendChild(defBase);
+          tgtSelect.appendChild(defTgt);
+
+          exps.forEach(e => {
+            const opt1 = document.createElement('option');
+            opt1.value = e.experiment_id;
+            opt1.textContent = `${e.name} (${e.experiment_id})`;
+            const opt2 = document.createElement('option');
+            opt2.value = e.experiment_id;
+            opt2.textContent = `${e.name} (${e.experiment_id})`;
+            baseSelect.appendChild(opt1);
+            tgtSelect.appendChild(opt2);
+          });
           if (prevBase) baseSelect.value = prevBase;
           if (prevTgt) tgtSelect.value = prevTgt;
         }
@@ -1065,8 +1091,17 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         const auditSelect = document.getElementById('audit-exp-select');
         if (auditSelect) {
           const prevAudit = auditSelect.value;
-          auditSelect.innerHTML = '<option value="">-- Select Experiment --</option>' +
-            exps.map(e => `<option value="${escapeHtml(e.experiment_id)}">${escapeHtml(e.name)} (${escapeHtml(e.experiment_id)})</option>`).join('');
+          auditSelect.replaceChildren();
+          const defAudit = document.createElement('option');
+          defAudit.value = '';
+          defAudit.textContent = '-- Select Experiment --';
+          auditSelect.appendChild(defAudit);
+          exps.forEach(e => {
+            const opt = document.createElement('option');
+            opt.value = e.experiment_id;
+            opt.textContent = `${e.name} (${e.experiment_id})`;
+            auditSelect.appendChild(opt);
+          });
           if (prevAudit) auditSelect.value = prevAudit;
         }
 
@@ -1129,24 +1164,58 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         });
         const data = await res.json();
         previewCard.style.display = 'block';
+        content.replaceChildren();
 
-        if (data.is_valid) {
+        if (res.ok && data.is_valid) {
           badge.className = 'badge badge-completed';
-          badge.innerText = 'VALIDATED';
-          content.innerHTML = `
-            <p style="color: var(--success); font-weight: 600; margin-bottom: 8px;">✓ Experiment configuration adheres to all research contracts.</p>
-            <p style="font-size: 0.8rem; color: var(--text-muted);">Computed Deterministic Fingerprint (SHA-256):</p>
-            <p class="mono" style="font-size: 0.85rem; color: var(--accent); word-break: break-all;">${data.fingerprint}</p>
-          `;
+          badge.textContent = 'VALIDATED';
+
+          const p1 = document.createElement('p');
+          p1.style.color = 'var(--success)';
+          p1.style.fontWeight = '600';
+          p1.style.marginBottom = '8px';
+          p1.textContent = '✓ Experiment configuration adheres to all research contracts.';
+
+          const p2 = document.createElement('p');
+          p2.style.fontSize = '0.8rem';
+          p2.style.color = 'var(--text-muted)';
+          p2.textContent = 'Computed Deterministic Fingerprint (SHA-256):';
+
+          const p3 = document.createElement('p');
+          p3.className = 'mono';
+          p3.style.fontSize = '0.85rem';
+          p3.style.color = 'var(--accent)';
+          p3.style.wordBreak = 'break-all';
+          p3.textContent = data.fingerprint || '';
+
+          content.appendChild(p1);
+          content.appendChild(p2);
+          content.appendChild(p3);
         } else {
           badge.className = 'badge badge-failed';
-          badge.innerText = 'VALIDATION FAILED';
-          content.innerHTML = `
-            <p style="color: var(--danger); font-weight: 600; margin-bottom: 8px;">Governance Violations Detected:</p>
-            <ul style="padding-left: 20px; font-size: 0.85rem; color: #ffa198;">
-              ${data.errors.map(e => `<li>${e}</li>`).join('')}
-            </ul>
-          `;
+          badge.textContent = 'VALIDATION FAILED';
+
+          const p = document.createElement('p');
+          p.style.color = 'var(--danger)';
+          p.style.fontWeight = '600';
+          p.style.marginBottom = '8px';
+          p.textContent = 'Governance Violations Detected:';
+
+          const ul = document.createElement('ul');
+          ul.style.paddingLeft = '20px';
+          ul.style.fontSize = '0.85rem';
+          ul.style.color = '#ffa198';
+
+          const rawErrors = data.errors || data.detail || ['Validation failed'];
+          const errList = Array.isArray(rawErrors) ? rawErrors : [rawErrors];
+          errList.forEach(e => {
+            const li = document.createElement('li');
+            li.textContent = typeof e === 'object' ? (e.msg || JSON.stringify(e)) : String(e);
+            ul.appendChild(li);
+          });
+
+          content.appendChild(p);
+          content.appendChild(ul);
         }
       } catch (err) {
         console.error(err);
@@ -1212,21 +1281,27 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         currentExperiment = await res.json();
         currentRunId = currentExperiment.experiment_id;
 
-        document.getElementById('detail-title').innerText = `${currentExperiment.name} (${currentExperiment.experiment_id})`;
+        document.getElementById('detail-title').textContent = `${currentExperiment.name} (${currentExperiment.experiment_id})`;
         const badge = document.getElementById('detail-status-badge');
-        badge.className = `badge badge-${currentExperiment.status.toLowerCase()}`;
-        badge.innerText = currentExperiment.status;
+        badge.className = `badge badge-${(currentExperiment.status || '').toLowerCase()}`;
+        badge.textContent = currentExperiment.status;
 
-        document.getElementById('detail-fp').innerText = currentExperiment.fingerprint;
-        document.getElementById('detail-strategy').innerText = `${currentExperiment.strategy_id} v${currentExperiment.strategy_version}`;
-        document.getElementById('detail-dataset').innerText = `${currentExperiment.dataset_id} (${currentExperiment.dataset_checksum.substring(0, 16)}...)`;
-        document.getElementById('detail-capital').innerText = `₹ ${currentExperiment.initial_capital.toLocaleString()}`;
+        document.getElementById('detail-fp').textContent = currentExperiment.fingerprint || '--';
+        document.getElementById('detail-strategy').textContent = `${currentExperiment.strategy_id} v${currentExperiment.strategy_version}`;
+        document.getElementById('detail-dataset').textContent = `${currentExperiment.dataset_id} (${(currentExperiment.dataset_checksum || '').substring(0, 16)}...)`;
+        document.getElementById('detail-capital').textContent = `₹ ${Number(currentExperiment.initial_capital || 0).toLocaleString()}`;
 
-        document.getElementById('monitor-run-id').innerText = currentRunId;
-        document.getElementById('monitor-lifecycle').innerText = currentExperiment.status;
+        const descEl = document.getElementById('detail-desc');
+        if (descEl) descEl.textContent = currentExperiment.description || '(No description provided)';
+
+        const paramsEl = document.getElementById('detail-params');
+        if (paramsEl) paramsEl.textContent = JSON.stringify(currentExperiment.parameters || {}, null, 2);
+
+        document.getElementById('monitor-run-id').textContent = currentRunId;
+        document.getElementById('monitor-lifecycle').textContent = currentExperiment.status;
         const stateBadge = document.getElementById('monitor-state-badge');
-        stateBadge.className = `badge badge-${currentExperiment.status.toLowerCase()}`;
-        stateBadge.innerText = currentExperiment.status;
+        stateBadge.className = `badge badge-${(currentExperiment.status || '').toLowerCase()}`;
+        stateBadge.textContent = currentExperiment.status;
 
         switchView('detail');
         pollRunStatus();
@@ -1248,7 +1323,7 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         const data = await res.json();
         currentRunId = data.run_id;
 
-        document.getElementById('monitor-run-id').innerText = currentRunId;
+        document.getElementById('monitor-run-id').textContent = currentRunId;
         pollRunStatus();
       } catch (err) {
         console.error(err);
@@ -1268,20 +1343,20 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
           if (!res.ok) return;
           const run = await res.json();
 
-          document.getElementById('monitor-lifecycle').innerText = run.status;
+          document.getElementById('monitor-lifecycle').textContent = run.status;
           const stateBadge = document.getElementById('monitor-state-badge');
-          stateBadge.className = `badge badge-${run.status.toLowerCase()}`;
-          stateBadge.innerText = run.status;
+          stateBadge.className = `badge badge-${(run.status || '').toLowerCase()}`;
+          stateBadge.textContent = run.status;
 
-          document.getElementById('monitor-trades-count').innerText = run.trades_count || 0;
-          document.getElementById('monitor-rejections-count').innerText = run.rejected_trades_count || 0;
+          document.getElementById('monitor-trades-count').textContent = run.trades_count || 0;
+          document.getElementById('monitor-rejections-count').textContent = run.rejected_trades_count || 0;
 
           // Fetch Audit trail
           const aRes = await fetch(`/api/v1/experiments/${currentExperiment.experiment_id}/runs/${currentRunId}/audit`);
           if (aRes.ok) {
             const auditEvents = await aRes.json();
             const logBox = document.getElementById('monitor-audit-log');
-            logBox.innerText = auditEvents.map(e => `[${e.timestamp}] ${e.event_type}: ${JSON.stringify(e.payload)}`).join('\\n') || '(No audit events recorded)';
+            logBox.textContent = auditEvents.map(e => `[${e.timestamp}] ${e.event_type}: ${JSON.stringify(e.payload)}`).join('\n') || '(No audit events recorded)';
           }
 
           if (run.status === 'COMPLETED' || run.status === 'FAILED') {
@@ -1420,47 +1495,101 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
 
         // Parameters table
         const paramsTbody = document.getElementById('cmp-params-tbody');
+        paramsTbody.replaceChildren();
         const paramEntries = Object.entries(data.parameters_different || {});
         if (paramEntries.length === 0) {
-          paramsTbody.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted); text-align: center;">No hyperparameter differences found.</td></tr>';
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 4;
+          td.style.color = 'var(--text-muted)';
+          td.style.textAlign = 'center';
+          td.textContent = 'No hyperparameter differences found.';
+          tr.appendChild(td);
+          paramsTbody.appendChild(tr);
         } else {
-          paramsTbody.innerHTML = paramEntries.map(([k, p]) => `
-            <tr>
-              <td class="mono"><strong>${escapeHtml(k)}</strong></td>
-              <td class="mono">${escapeHtml(JSON.stringify(p.baseline_value))}</td>
-              <td class="mono">${escapeHtml(JSON.stringify(p.target_value))}</td>
-              <td>
-                ${p.is_different 
-                  ? '<span class="badge badge-pending">CHANGED</span>' 
-                  : '<span class="badge badge-completed">EQUAL</span>'}
-              </td>
-            </tr>
-          `).join('');
+          paramEntries.forEach(([k, p]) => {
+            const tr = document.createElement('tr');
+
+            const tdKey = document.createElement('td');
+            tdKey.className = 'mono';
+            const strong = document.createElement('strong');
+            strong.textContent = k;
+            tdKey.appendChild(strong);
+
+            const tdBase = document.createElement('td');
+            tdBase.className = 'mono';
+            tdBase.textContent = JSON.stringify(p.baseline_value);
+
+            const tdTgt = document.createElement('td');
+            tdTgt.className = 'mono';
+            tdTgt.textContent = JSON.stringify(p.target_value);
+
+            const tdStatus = document.createElement('td');
+            const spanBadge = document.createElement('span');
+            spanBadge.className = `badge ${p.is_different ? 'badge-pending' : 'badge-completed'}`;
+            spanBadge.textContent = p.is_different ? 'CHANGED' : 'EQUAL';
+            tdStatus.appendChild(spanBadge);
+
+            tr.appendChild(tdKey);
+            tr.appendChild(tdBase);
+            tr.appendChild(tdTgt);
+            tr.appendChild(tdStatus);
+            paramsTbody.appendChild(tr);
+          });
         }
 
         // Metrics table
         const metricsTbody = document.getElementById('cmp-metrics-tbody');
+        metricsTbody.replaceChildren();
         const metricEntries = Object.entries(data.metric_differences || {});
         if (metricEntries.length === 0) {
-          metricsTbody.innerHTML = '<tr><td colspan="5" style="color: var(--text-muted); text-align: center;">No metric comparisons available.</td></tr>';
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 5;
+          td.style.color = 'var(--text-muted)';
+          td.style.textAlign = 'center';
+          td.textContent = 'No metric comparisons available.';
+          tr.appendChild(td);
+          metricsTbody.appendChild(tr);
         } else {
-          metricsTbody.innerHTML = metricEntries.map(([k, m]) => {
+          metricEntries.forEach(([k, m]) => {
+            const tr = document.createElement('tr');
+
+            const tdName = document.createElement('td');
+            const strong = document.createElement('strong');
+            strong.textContent = m.metric_name || k;
+            tdName.appendChild(strong);
+
+            const tdBase = document.createElement('td');
+            tdBase.className = 'mono';
+            tdBase.textContent = m.baseline_value !== null ? String(m.baseline_value) : 'N/A';
+
+            const tdTgt = document.createElement('td');
+            tdTgt.className = 'mono';
+            tdTgt.textContent = m.target_value !== null ? String(m.target_value) : 'N/A';
+
             let deltaStr = '--';
             let deltaPctStr = '--';
             if (m.is_available && m.difference !== null) {
               deltaStr = (m.difference > 0 ? '+' : '') + m.difference;
               deltaPctStr = m.difference_pct !== null ? (m.difference_pct > 0 ? '+' : '') + m.difference_pct + '%' : 'N/A';
             }
-            return `
-              <tr>
-                <td><strong>${escapeHtml(m.metric_name)}</strong></td>
-                <td class="mono">${m.baseline_value !== null ? escapeHtml(m.baseline_value) : '<span style="color: var(--text-muted);">N/A</span>'}</td>
-                <td class="mono">${m.target_value !== null ? escapeHtml(m.target_value) : '<span style="color: var(--text-muted);">N/A</span>'}</td>
-                <td class="mono">${escapeHtml(deltaStr)}</td>
-                <td class="mono">${escapeHtml(deltaPctStr)}</td>
-              </tr>
-            `;
-          }).join('');
+
+            const tdDelta = document.createElement('td');
+            tdDelta.className = 'mono';
+            tdDelta.textContent = deltaStr;
+
+            const tdPct = document.createElement('td');
+            tdPct.className = 'mono';
+            tdPct.textContent = deltaPctStr;
+
+            tr.appendChild(tdName);
+            tr.appendChild(tdBase);
+            tr.appendChild(tdTgt);
+            tr.appendChild(tdDelta);
+            tr.appendChild(tdPct);
+            metricsTbody.appendChild(tr);
+          });
         }
 
       } catch (err) {
@@ -1494,11 +1623,11 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
 
         currentAuditData = { provenance: prov, audit_events: events };
 
-        document.getElementById('prov-fp').innerText = prov.fingerprint;
-        document.getElementById('prov-dataset').innerText = `${prov.dataset_id} v${prov.dataset_version} (${prov.dataset_checksum.substring(0, 16)}...)`;
-        document.getElementById('prov-strategy').innerText = `${prov.strategy_id} v${prov.strategy_version} (${prov.code_revision})`;
-        document.getElementById('prov-repro').innerText = prov.reproducibility_hash || '--';
-        document.getElementById('prov-params-box').innerText = JSON.stringify({
+        document.getElementById('prov-fp').textContent = prov.fingerprint;
+        document.getElementById('prov-dataset').textContent = `${prov.dataset_id} v${prov.dataset_version} (${(prov.dataset_checksum || '').substring(0, 16)}...)`;
+        document.getElementById('prov-strategy').textContent = `${prov.strategy_id} v${prov.strategy_version} (${prov.code_revision})`;
+        document.getElementById('prov-repro').textContent = prov.reproducibility_hash || '--';
+        document.getElementById('prov-params-box').textContent = JSON.stringify({
           parameters: prov.parameters,
           cost_model: prov.cost_model,
           slippage_model: prov.slippage_model,
@@ -1508,28 +1637,59 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
         }, null, 2);
 
         const tbody = document.getElementById('audit-events-tbody');
-        document.getElementById('audit-events-count').innerText = `${events.length} events`;
+        document.getElementById('audit-events-count').textContent = `${events.length} events`;
+        tbody.replaceChildren();
 
         if (events.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted);">No audit events recorded yet for this experiment.</td></tr>';
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 3;
+          td.style.textAlign = 'center';
+          td.style.color = 'var(--text-muted)';
+          td.textContent = 'No audit events recorded yet for this experiment.';
+          tr.appendChild(td);
+          tbody.appendChild(tr);
         } else {
-          tbody.innerHTML = events.map(e => {
+          events.forEach(e => {
+            const tr = document.createElement('tr');
+
+            const tdTime = document.createElement('td');
+            tdTime.className = 'mono';
+            tdTime.style.fontSize = '0.75rem';
+            tdTime.style.color = 'var(--text-muted)';
+            tdTime.textContent = e.timestamp ? new Date(e.timestamp).toISOString() : '';
+
+            const tdType = document.createElement('td');
+            const spanBadge = document.createElement('span');
             let badgeClass = 'badge-created';
-            if (e.event_type.includes('REJECT') || e.event_type.includes('ERROR') || e.event_type.includes('FAILED')) {
+            const evtType = String(e.event_type || '');
+            if (evtType.includes('REJECT') || evtType.includes('ERROR') || evtType.includes('FAILED')) {
               badgeClass = 'badge-failed';
-            } else if (e.event_type.includes('COMPLETED') || e.event_type.includes('APPROVED') || e.event_type.includes('FILLED')) {
+            } else if (evtType.includes('COMPLETED') || evtType.includes('APPROVED') || evtType.includes('FILLED')) {
               badgeClass = 'badge-completed';
-            } else if (e.event_type.includes('PROPOSED') || e.event_type.includes('CHECK')) {
+            } else if (evtType.includes('PROPOSED') || evtType.includes('CHECK')) {
               badgeClass = 'badge-running';
             }
-            return `
-              <tr>
-                <td class="mono" style="font-size: 0.75rem; color: var(--text-muted);">${new Date(e.timestamp).toISOString()}</td>
-                <td><span class="badge ${badgeClass}">${e.event_type}</span></td>
-                <td><pre class="terminal-box" style="padding: 6px 10px; font-size: 0.75rem; max-height: 100px;">${JSON.stringify(e.payload, null, 2)}</pre></td>
-              </tr>
-            `;
-          }).join('');
+            spanBadge.className = `badge ${badgeClass}`;
+            spanBadge.textContent = evtType;
+            tdType.appendChild(spanBadge);
+
+            const tdPayload = document.createElement('td');
+            const preBox = document.createElement('pre');
+            preBox.className = 'terminal-box';
+            preBox.style.padding = '6px 10px';
+            preBox.style.fontSize = '0.75rem';
+            preBox.style.maxHeight = '100px';
+            const codeEl = document.createElement('code');
+            codeEl.textContent = JSON.stringify(e.payload, null, 2);
+            preBox.appendChild(codeEl);
+            tdPayload.appendChild(preBox);
+
+            tr.appendChild(tdTime);
+            tr.appendChild(tdType);
+            tr.appendChild(tdPayload);
+            tbody.appendChild(tr);
+          });
         }
 
         provCard.style.display = 'block';

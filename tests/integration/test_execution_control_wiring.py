@@ -61,7 +61,11 @@ def setup_security_and_shared_breaker(monkeypatch, tmp_path):
 
     paper = get_paper_engine()
     paper.circuit_breaker = cb
-    return cb
+    yield cb
+    # Teardown: reset clean circuit breaker to avoid test pollution
+    clean_cb = CircuitBreakerEngine(initial_equity=100000.0)
+    set_circuit_breaker(clean_cb)
+    paper.circuit_breaker = clean_cb
 
 
 def test_shared_breaker_blocks_paper_orders():

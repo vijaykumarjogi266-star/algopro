@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from apps.api.core.auth import Role, require_administrator, require_reader
+from apps.api.core.auth import Role, require_administrator, require_operator, require_reader
 from services.paper_engine.adapters.credentials import (
     BrokerConnectionConfig,
     BrokerCredentialStore,
@@ -41,7 +41,7 @@ async def list_connections(_role: Role = Depends(require_reader)) -> List[Dict[s
 @router.post("/connections", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, summary="Create or update broker connection")
 async def save_connection(
     req: SaveConnectionRequest,
-    _role: Role = Depends(require_administrator),
+    _role: Role = Depends(require_operator),
 ) -> Dict[str, Any]:
     """Saves a broker adapter configuration.
     

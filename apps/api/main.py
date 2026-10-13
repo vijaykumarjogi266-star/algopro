@@ -10,14 +10,14 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from apps.api.core.auth import has_configured_keys, resolve_key_role, validate_api_key_at_startup
 from apps.api.core.config import is_invalid_secret, settings
-from apps.api.core.logging import get_logger, setup_logging
+from apps.api.core.logging import get_logger, redact_sensitive_secrets, setup_logging
 from apps.api.routes.health import router as health_router
 from apps.api.routes.system import router as system_router
 from apps.api.routes.data import router as data_router
@@ -51,31 +51,36 @@ PUBLIC_PATHS = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan management: fail-closed in production."""
-    validate_api_key_at_startup()
+    """Application lifespan management: fail-closed in production with secret redaction."""
+    try:
+        validate_api_key_at_startup()
 
-    if settings.ENVIRONMENT == "production":
-        admin_key = settings.ALGO_LAB_API_KEY or getattr(settings, "ALGO_LAB_API_KEY_ADMIN", "")
-        if is_invalid_secret(admin_key):
-            raise RuntimeError("ALGO_LAB_API_KEY must be configured in production.")
-        if is_invalid_secret(settings.BROKER_CREDENTIAL_ENCRYPTION_KEY):
-            raise RuntimeError("BROKER_CREDENTIAL_ENCRYPTION_KEY must be configured in production.")
-        if is_invalid_secret(settings.CIRCUIT_BREAKER_STATE_KEY):
-            raise RuntimeError("CIRCUIT_BREAKER_STATE_KEY must be configured in production.")
-        if is_invalid_secret(settings.CIRCUIT_BREAKER_REARM_SECRET):
-            raise RuntimeError("CIRCUIT_BREAKER_REARM_SECRET must be configured in production.")
+        if settings.ENVIRONMENT == "production":
+            admin_key = settings.ALGO_LAB_API_KEY or getattr(settings, "ALGO_LAB_API_KEY_ADMIN", "")
+            if is_invalid_secret(admin_key):
+                raise RuntimeError("ALGO_LAB_API_KEY must be configured in production.")
+            if is_invalid_secret(settings.BROKER_CREDENTIAL_ENCRYPTION_KEY):
+                raise RuntimeError("BROKER_CREDENTIAL_ENCRYPTION_KEY must be configured in production.")
+            if is_invalid_secret(settings.CIRCUIT_BREAKER_STATE_KEY):
+                raise RuntimeError("CIRCUIT_BREAKER_STATE_KEY must be configured in production.")
+            if is_invalid_secret(settings.CIRCUIT_BREAKER_REARM_SECRET):
+                raise RuntimeError("CIRCUIT_BREAKER_REARM_SECRET must be configured in production.")
 
-    logger.info(
-        "Algo Lab OS API starting up",
-        extra={
-            "version": settings.PROJECT_VERSION,
-            "environment": settings.ENVIRONMENT,
-            "allow_live_trading": settings.ALLOW_LIVE_TRADING,
-            "allow_real_broker": settings.ALLOW_REAL_BROKER_EXECUTION,
-        },
-    )
-    yield
-    logger.info("Algo Lab OS API shutting down")
+        logger.info(
+            "Algo Lab OS API starting up",
+            extra={
+                "version": settings.PROJECT_VERSION,
+                "environment": settings.ENVIRONMENT,
+                "allow_live_trading": settings.ALLOW_LIVE_TRADING,
+                "allow_real_broker": settings.ALLOW_REAL_BROKER_EXECUTION,
+            },
+        )
+        yield
+        logger.info("Algo Lab OS API shutting down")
+    except Exception as exc:
+        sanitized_msg = redact_sensitive_secrets(str(exc))
+        logger.error(f"Application startup failure: {sanitized_msg}")
+        raise RuntimeError(f"Application startup failure: {sanitized_msg}") from None
 
 
 app = FastAPI(
@@ -105,13 +110,30 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         sanitized = {
             "type": err.get("type"),
             "loc": err.get("loc"),
-            "msg": err.get("msg"),
+            "msg": redact_sensitive_secrets(str(err.get("msg", ""))),
         }
         sanitized_errors.append(sanitized)
     return JSONResponse(
         status_code=422,
         content={"detail": sanitized_errors},
     )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    """Sanitized global exception handler preventing credentials or internal secrets leakage."""
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": redact_sensitive_secrets(str(exc.detail))},
+        )
+    sanitized_msg = redact_sensitive_secrets(str(exc))
+    logger.error(f"Internal server error: {sanitized_msg}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+    )
+
 
 
 @app.middleware("http")

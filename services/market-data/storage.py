@@ -187,13 +187,13 @@ class ParquetMarketDataStorage:
         if not path.exists():
             raise FileNotFoundError(f"Parquet file not found at {path}")
 
-        query = f"""
-            SELECT *
-            FROM read_parquet('{path}')
-            WHERE market_timestamp <= '{as_of_timestamp.isoformat()}'
-            ORDER BY market_timestamp ASC
-        """
         if self._duckdb_con is None:
             raise RuntimeError("DuckDB is not installed or available in this environment.")
-        arrow_table = self._duckdb_con.execute(query).arrow()
+        query = """
+            SELECT *
+            FROM read_parquet(?)
+            WHERE market_timestamp <= ?
+            ORDER BY market_timestamp ASC
+        """
+        arrow_table = self._duckdb_con.execute(query, [str(path), as_of_timestamp.isoformat()]).arrow()
         return pl.from_arrow(arrow_table)
