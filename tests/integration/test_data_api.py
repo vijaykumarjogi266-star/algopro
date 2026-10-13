@@ -62,3 +62,44 @@ async def test_api_validate_bars_endpoint(async_client: AsyncClient):
     assert data["total_bars"] == 1
     assert data["overall_status"] == "VALID"
     assert data["has_critical_failures"] is False
+
+
+@pytest.mark.asyncio
+async def test_a06_conflicting_dataset_registration_returns_conflict(async_client: AsyncClient, monkeypatch):
+    from apps.api.core.config import settings
+
+    researcher_key = "test_key_researcher_0123456789abcdef"
+    monkeypatch.setattr(settings, "ALGO_LAB_API_KEY_RESEARCHER", researcher_key)
+    monkeypatch.setattr(settings, "ALGO_LAB_API_KEY_ADMIN", "admin_key_0123456789abcdef0123456789")
+    monkeypatch.setattr(settings, "ALLOW_LOCAL_AUTH_BYPASS", False)
+
+    headers = {"X-API-Key": researcher_key}
+    now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    payload1 = {
+        "dataset_id": "test_api_conflict_ds",
+        "name": "API Conflict Test",
+        "version": "v1.0.0",
+        "exchange": "NSE",
+        "asset_class": "EQUITY",
+        "timeframe": "1d",
+        "symbols": ["TCS"],
+        "start_date": now.isoformat(),
+        "end_date": datetime(2025, 1, 15, tzinfo=timezone.utc).isoformat(),
+        "bar_count": 10,
+        "sha256_checksum": "a" * 64,
+        "metadata": {"source": "unit_test"},
+    }
+
+    # First registration must succeed with 201 Created
+    res1 = await async_client.post("/api/v1/datasets/register", json=payload1, headers=headers)
+    assert res1.status_code == 201
+    data1 = res1.json()
+    assert data1["dataset_id"] == "test_api_conflict_ds"
+    assert data1["version"] == "v1.0.0"
+
+    # Conflicting registration (different checksum for same version) must return 409 Conflict
+    payload_conflict = dict(payload1)
+    payload_conflict["sha256_checksum"] = "b" * 64
+    res2 = await async_client.post("/api/v1/datasets/register", json=payload_conflict, headers=headers)
+    assert res2.status_code == 409
+    assert "already exists with differing" in res2.json()["detail"]

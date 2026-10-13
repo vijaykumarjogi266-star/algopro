@@ -143,7 +143,7 @@ class TestStage4Step7(unittest.TestCase):
 
     def test_backtest_service_async_execution(self):
         store = BacktestRunStore(":memory:")
-        service = BacktestService(store=store, max_workers=2)
+        service = BacktestService(store=store, max_workers=2, allow_synthetic=True)
 
         start = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
         end = datetime(2026, 6, 30, 15, 30, tzinfo=timezone.utc)

@@ -15,6 +15,7 @@ from data.schemas.canonical_market_data import CanonicalMarketDataBar
 from services.market_data.registry import (
     DatasetRecord,
     DatasetRegistryStore,
+    DatasetConflictError,
     DatasetDriftError,
     DatasetIntegrityError,
     DatasetNotFoundError,
@@ -76,7 +77,10 @@ async def register_dataset(
         sha256_checksum=req.sha256_checksum,
         metadata=req.metadata,
     )
-    return registry_store.register_dataset(record)
+    try:
+        return registry_store.register_dataset(record)
+    except DatasetConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
 
 
 @router.get("/{dataset_id}", response_model=DatasetRecord, summary="Get dataset metadata")

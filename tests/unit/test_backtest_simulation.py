@@ -5,7 +5,7 @@ from services.backtest_engine.contracts import CostModelConfig, SlippageModelCon
 
 
 def test_deterministic_simulation_results():
-    service = BacktestService()
+    service = BacktestService(allow_synthetic=True)
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     end = datetime(2025, 6, 1, tzinfo=timezone.utc)
     universe = ["RELIANCE.NS"]
@@ -25,7 +25,7 @@ def test_deterministic_simulation_results():
 
 def test_no_trade_zero_metrics():
     import time
-    service = BacktestService()
+    service = BacktestService(allow_synthetic=True)
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     end = datetime(2025, 1, 5, tzinfo=timezone.utc)  # Too short for 21-day SMA
     universe = ["TCS.NS"]
@@ -53,7 +53,7 @@ def test_no_trade_zero_metrics():
 
 
 def test_changing_costs_changes_metrics():
-    service = BacktestService()
+    service = BacktestService(allow_synthetic=True)
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     end = datetime(2025, 8, 1, tzinfo=timezone.utc)
     universe = ["INFY.NS"]

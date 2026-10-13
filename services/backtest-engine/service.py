@@ -95,11 +95,13 @@ class BacktestService:
         max_workers: int = 2,
         risk_engine: Optional[RiskEngine] = None,
         dataset_store: Optional[DatasetRegistryStore] = None,
+        allow_synthetic: bool = False,
     ):
         self.store = store or BacktestRunStore()
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.risk_engine = risk_engine or RiskEngine()
         self.dataset_store = dataset_store or DatasetRegistryStore()
+        self.allow_synthetic = allow_synthetic
         self._in_memory_dataset_bars: Dict[str, List[Any]] = {}
 
     def register_dataset_bars(self, dataset_id: str, bars: List[Any], version: Optional[str] = None) -> None:
@@ -111,8 +113,12 @@ class BacktestService:
 
     register_in_memory_dataset = register_dataset_bars
 
-    def _ensure_default_dataset(self) -> None:
-        """Seeds canonical in-memory bars and registry entry for NSE_NIFTY50_DAILY."""
+    def seed_test_default_dataset(self) -> None:
+        """Test-only fixture helper to explicitly seed canonical in-memory bars and registry entry."""
+        self._seed_default_dataset_internal()
+
+    def _seed_default_dataset_internal(self) -> None:
+        """Internal seeding logic for the default test dataset fixture."""
         if "NSE_NIFTY50_DAILY" in self._in_memory_dataset_bars:
             return
         base_ts = datetime(2025, 1, 1, 9, 15, tzinfo=timezone.utc)
@@ -156,6 +162,17 @@ class BacktestService:
         )
         self.dataset_store.register_dataset(rec)
         self._in_memory_dataset_bars["NSE_NIFTY50_DAILY"] = bars
+        self._in_memory_dataset_bars[("NSE_NIFTY50_DAILY", "2026.09.14")] = bars
+        self._in_memory_dataset_bars["NSE_NIFTY50_DAILY:2026.09.14"] = bars
+
+    def _ensure_default_dataset(self) -> None:
+        """Guarded helper: raises RuntimeError on production paths unless allow_synthetic=True."""
+        if not self.allow_synthetic:
+            raise RuntimeError(
+                "Automatic default synthetic dataset generation is prohibited on production paths. "
+                "Historical backtests require actual registered datasets."
+            )
+        self._seed_default_dataset_internal()
 
     def submit_backtest(
         self,
@@ -189,7 +206,7 @@ class BacktestService:
         params = parameters or {}
 
         target_ds_id = dataset_id or "NSE_NIFTY50_DAILY"
-        if target_ds_id == "NSE_NIFTY50_DAILY":
+        if self.allow_synthetic and target_ds_id == "NSE_NIFTY50_DAILY":
             self._ensure_default_dataset()
 
         if dataset_version is None:
@@ -200,6 +217,8 @@ class BacktestService:
             ds_rec = self.dataset_store.get_dataset(target_ds_id, version=dataset_version)
             if ds_rec:
                 dataset_checksum = ds_rec.sha256_checksum
+            else:
+                dataset_checksum = "0" * 64
 
         # 2. Compute deterministic reproducibility hash
         repro_dict = {
@@ -288,6 +307,11 @@ class BacktestService:
         base_price: float = 1000.0,
     ) -> List[Dict[str, float]]:
         """Generates deterministic synthetic daily bars for testing when explicitly permitted."""
+        if not self.allow_synthetic:
+            raise RuntimeError(
+                "Synthetic bar generation is prohibited on production paths. "
+                "All backtests require registered historical datasets."
+            )
         rng = np.random.default_rng(seed)
         bars = []
         current = start_date
@@ -763,7 +787,7 @@ class BacktestService:
             req_dataset_version = (exp_def.dataset_version if exp_def else getattr(repro, "dataset_version", None)) or "2026.09.14"
             req_checksum = exp_def.dataset_checksum if exp_def else getattr(repro, "dataset_checksum", None)
 
-            if req_dataset_id == "NSE_NIFTY50_DAILY":
+            if self.allow_synthetic and req_dataset_id == "NSE_NIFTY50_DAILY":
                 self._ensure_default_dataset()
 
             if not req_dataset_id:

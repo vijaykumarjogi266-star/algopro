@@ -41,6 +41,11 @@ class DatasetIntegrityError(DatasetDriftError):
     pass
 
 
+class DatasetConflictError(DatasetIntegrityError):
+    """Raised when attempting to register or mutate an existing dataset version with conflicting content or provenance."""
+    pass
+
+
 class DatasetNotFoundError(Exception):
     """Raised when a dataset cannot be found in the registry."""
     pass
@@ -146,30 +151,69 @@ class DatasetRegistryStore:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_checksum ON datasets(sha256_checksum)")
 
     def register_dataset(self, record: DatasetRecord) -> DatasetRecord:
-        """Registers a new dataset record or updates metadata if not drifted."""
+        """Registers a new dataset record or idempotently updates mutable metadata.
+        
+        Enforces immutable dataset versioning: attempting to modify content
+        or provenance for an existing (dataset_id, version) raises DatasetConflictError.
+        """
+        def _norm_dt(dt: Any) -> Optional[str]:
+            if dt is None:
+                return None
+            if isinstance(dt, str):
+                dt = datetime.fromisoformat(dt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat()
+
         with self._lock:
             conn = self._get_connection()
             with conn:
+                existing = self.get_dataset(record.dataset_id, version=record.version)
+                if existing:
+                    # Verify content and provenance immutability
+                    checksum_mismatch = (existing.sha256_checksum != record.sha256_checksum)
+                    bar_count_mismatch = (existing.bar_count != record.bar_count)
+                    timeframe_mismatch = (existing.timeframe != record.timeframe)
+                    exchange_mismatch = (existing.exchange != record.exchange)
+                    asset_class_mismatch = (existing.asset_class != record.asset_class)
+                    symbols_mismatch = (sorted(existing.symbols) != sorted(record.symbols))
+                    start_date_mismatch = (_norm_dt(existing.start_date) != _norm_dt(record.start_date))
+                    end_date_mismatch = (_norm_dt(existing.end_date) != _norm_dt(record.end_date))
+
+                    if (checksum_mismatch or bar_count_mismatch or timeframe_mismatch or
+                        exchange_mismatch or asset_class_mismatch or symbols_mismatch or
+                        start_date_mismatch or end_date_mismatch):
+                        raise DatasetConflictError(
+                            f"Dataset '{record.dataset_id}' version '{record.version}' already exists "
+                            f"with differing content or provenance. "
+                            f"Mutating an existing dataset version is prohibited. "
+                            f"Register with a new version instead."
+                        )
+
+                    # Content is identical: idempotent update of mutable fields only
+                    conn.execute("""
+                        UPDATE datasets
+                        SET quality_status = ?,
+                            storage_path = COALESCE(?, storage_path),
+                            metadata = ?,
+                            updated_at = ?
+                        WHERE dataset_id = ? AND version = ?
+                    """, (
+                        record.quality_status.value if hasattr(record.quality_status, "value") else str(record.quality_status),
+                        record.storage_path,
+                        json.dumps(record.metadata),
+                        record.updated_at.isoformat(),
+                        record.dataset_id,
+                        record.version,
+                    ))
+                    return self.get_dataset(record.dataset_id, version=record.version) or record
+
                 conn.execute("""
                 INSERT INTO datasets (
                     dataset_id, name, version, exchange, asset_class, timeframe,
                     symbols, start_date, end_date, bar_count, sha256_checksum,
                     quality_status, storage_path, metadata, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(dataset_id, version) DO UPDATE SET
-                    name = excluded.name,
-                    exchange = excluded.exchange,
-                    asset_class = excluded.asset_class,
-                    timeframe = excluded.timeframe,
-                    symbols = excluded.symbols,
-                    start_date = excluded.start_date,
-                    end_date = excluded.end_date,
-                    bar_count = excluded.bar_count,
-                    sha256_checksum = excluded.sha256_checksum,
-                    quality_status = excluded.quality_status,
-                    storage_path = excluded.storage_path,
-                    metadata = excluded.metadata,
-                    updated_at = excluded.updated_at
                 """, (
                     record.dataset_id,
                     record.name,

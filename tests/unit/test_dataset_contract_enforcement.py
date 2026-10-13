@@ -24,6 +24,7 @@ from services.market_data.registry import (
     DatasetRecord,
     DatasetRegistryStore,
     compute_dataset_checksum,
+    DatasetConflictError,
     DatasetIntegrityError,
     DatasetDriftError,
     DatasetNotFoundError,
@@ -628,3 +629,353 @@ def test_registered_dataset_without_actual_bars_fails(monkeypatch):
     assert status["status"] == "FAILED"
     events = [e["event_type"] for e in service.store.get_audit_events(exp_id)]
     assert "DATA_UNAVAILABLE" in events
+
+
+# ==============================================================================
+# Batch A Remediation Tests (A01 - A08)
+# ==============================================================================
+
+def test_a01_missing_dataset_produces_no_generated_history():
+    """A01: Missing dataset and default-named dataset without explicit fixture produce no generated history."""
+    store = DatasetRegistryStore(":memory:")
+    service = BacktestService(dataset_store=store)  # production mode: allow_synthetic=False
+
+    base_ts = datetime(2025, 1, 1, 9, 15, tzinfo=timezone.utc)
+    exp_id = "exp_a01_missing_default"
+
+    # Submit backtest requesting default named dataset without any pre-registered fixtures
+    service.submit_backtest(
+        strategy_id="Canonical_SMA",
+        universe=["RELIANCE"],
+        start_date=base_ts,
+        end_date=base_ts + timedelta(days=30),
+        initial_capital=100_000.0,
+        experiment_id=exp_id,
+        dataset_id="NSE_NIFTY50_DAILY",
+    )
+
+    status = _await_terminal_status(service, exp_id)
+    assert status["status"] == "FAILED"
+    events = [e["event_type"] for e in service.store.get_audit_events(exp_id)]
+    assert "DATA_UNAVAILABLE" in events
+
+    # Verify fail-closed invariants: zero synthetic bars loaded, no trades, no equity curve, no metrics
+    assert "NSE_NIFTY50_DAILY" not in service._in_memory_dataset_bars
+    assert len(service.store.get_trades(exp_id)) == 0
+    assert len(service.store.get_equity_curve(exp_id)) == 0
+    run = service.get_run_status(exp_id)
+    assert run.get("metrics_json") is None or run.get("metrics_json") == ""
+
+
+def test_a02_production_path_blocks_synthetic_helpers():
+    """A02: Calling synthetic generation helpers on production path fails closed."""
+    service = BacktestService()  # allow_synthetic=False by default
+
+    with pytest.raises(RuntimeError, match="prohibited on production paths"):
+        service._ensure_default_dataset()
+
+    base_ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    with pytest.raises(RuntimeError, match="prohibited on production paths"):
+        service._generate_ohlcv_bars("TCS", base_ts, base_ts + timedelta(days=10), seed=42)
+
+
+def test_a03_explicit_registered_fixture_succeeds():
+    """A03: Explicit registered fixture executes and completes successfully."""
+    store = DatasetRegistryStore(":memory:")
+    service = BacktestService(dataset_store=store)
+
+    bars = _generate_bars("TCS", 40)
+    chk = compute_dataset_checksum(bars)
+    rec = DatasetRecord(
+        dataset_id="explicit_fixture_ds",
+        name="Explicit Fixture",
+        version="v1.0.0",
+        exchange="NSE",
+        asset_class="EQUITY",
+        timeframe="1d",
+        symbols=["TCS"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        bar_count=len(bars),
+        sha256_checksum=chk,
+        quality_status=DataQualityStatus.VALID,
+    )
+    store.register_dataset(rec)
+    service.register_dataset_bars("explicit_fixture_ds", bars, version="v1.0.0")
+
+    exp_id = "exp_a03_explicit"
+    exp_def = ExperimentDefinition(
+        experiment_id=exp_id,
+        name="Explicit Fixture Test",
+        strategy_id="Canonical_SMA",
+        strategy_version="1.0.0",
+        dataset_id="explicit_fixture_ds",
+        dataset_version="v1.0.0",
+        dataset_checksum=chk,
+        universe=["TCS"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        initial_capital=100_000.0,
+    )
+    service.store.save_experiment(exp_def)
+    service.submit_backtest(
+        strategy_id="Canonical_SMA",
+        universe=["TCS"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        initial_capital=100_000.0,
+        experiment_id=exp_id,
+        dataset_id="explicit_fixture_ds",
+        dataset_version="v1.0.0",
+        dataset_checksum=chk,
+    )
+
+    status = _await_terminal_status(service, exp_id)
+    assert status["status"] == "COMPLETED"
+
+
+def test_a04_dataset_version_immutable_on_conflict():
+    """A04: Modifying content or provenance on existing version raises DatasetConflictError, leaving record unchanged."""
+    store = DatasetRegistryStore(":memory:")
+    bars = _generate_bars("INFY", 20)
+    chk = compute_dataset_checksum(bars)
+
+    orig_rec = DatasetRecord(
+        dataset_id="ds_immutable",
+        name="INFY Daily",
+        version="v1.0.0",
+        exchange="NSE",
+        asset_class="EQUITY",
+        timeframe="1d",
+        symbols=["INFY"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        bar_count=len(bars),
+        sha256_checksum=chk,
+        quality_status=DataQualityStatus.VALID,
+        metadata={"initial": True},
+    )
+    store.register_dataset(orig_rec)
+
+    # 1. Conflict on modified checksum
+    conflict_chk = DatasetRecord(
+        dataset_id="ds_immutable",
+        name="INFY Daily",
+        version="v1.0.0",
+        exchange="NSE",
+        asset_class="EQUITY",
+        timeframe="1d",
+        symbols=["INFY"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        bar_count=len(bars),
+        sha256_checksum="f" * 64,
+        quality_status=DataQualityStatus.VALID,
+    )
+    with pytest.raises(DatasetConflictError, match="already exists with differing"):
+        store.register_dataset(conflict_chk)
+
+    # 2. Conflict on bar_count
+    conflict_count = DatasetRecord(
+        dataset_id="ds_immutable",
+        name="INFY Daily",
+        version="v1.0.0",
+        exchange="NSE",
+        asset_class="EQUITY",
+        timeframe="1d",
+        symbols=["INFY"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        bar_count=999,
+        sha256_checksum=chk,
+        quality_status=DataQualityStatus.VALID,
+    )
+    with pytest.raises(DatasetConflictError, match="already exists with differing"):
+        store.register_dataset(conflict_count)
+
+    # 3. Conflict on start_date
+    conflict_dates = DatasetRecord(
+        dataset_id="ds_immutable",
+        name="INFY Daily",
+        version="v1.0.0",
+        exchange="NSE",
+        asset_class="EQUITY",
+        timeframe="1d",
+        symbols=["INFY"],
+        start_date=bars[0].timestamp + timedelta(days=1),
+        end_date=bars[-1].timestamp,
+        bar_count=len(bars),
+        sha256_checksum=chk,
+        quality_status=DataQualityStatus.VALID,
+    )
+    with pytest.raises(DatasetConflictError, match="already exists with differing"):
+        store.register_dataset(conflict_dates)
+
+    # Verify original record remains pristine
+    preserved = store.get_dataset("ds_immutable", version="v1.0.0")
+    assert preserved.sha256_checksum == chk
+    assert preserved.bar_count == len(bars)
+    assert preserved.start_date == orig_rec.start_date
+    assert preserved.metadata == {"initial": True}
+
+
+def test_a05_identical_registration_is_idempotent():
+    """A05: Identical registration succeeds idempotently, updating mutable annotations."""
+    store = DatasetRegistryStore(":memory:")
+    bars = _generate_bars("SBIN", 15)
+    chk = compute_dataset_checksum(bars)
+
+    rec = DatasetRecord(
+        dataset_id="ds_idempotent",
+        name="SBIN Daily",
+        version="v1.0.0",
+        exchange="NSE",
+        asset_class="EQUITY",
+        timeframe="1d",
+        symbols=["SBIN"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        bar_count=len(bars),
+        sha256_checksum=chk,
+        quality_status=DataQualityStatus.VALID,
+        metadata={"version_state": "draft"},
+    )
+    store.register_dataset(rec)
+
+    # Re-register with identical content but updated mutable metadata
+    rec_update = DatasetRecord(
+        dataset_id="ds_idempotent",
+        name="SBIN Daily",
+        version="v1.0.0",
+        exchange="NSE",
+        asset_class="EQUITY",
+        timeframe="1d",
+        symbols=["SBIN"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        bar_count=len(bars),
+        sha256_checksum=chk,
+        quality_status=DataQualityStatus.VALID,
+        metadata={"version_state": "verified", "reviewed_by": "qa"},
+    )
+    updated = store.register_dataset(rec_update)
+    assert updated.metadata == {"version_state": "verified", "reviewed_by": "qa"}
+
+    stored = store.get_dataset("ds_idempotent", version="v1.0.0")
+    assert stored.metadata == {"version_state": "verified", "reviewed_by": "qa"}
+    assert stored.sha256_checksum == chk
+
+
+def test_a07_replay_pinned_to_exact_version():
+    """A07: Replay remains strictly pinned to original registered version despite subsequent versions."""
+    store = DatasetRegistryStore(":memory:")
+    service = BacktestService(dataset_store=store)
+
+    bars_v1 = _generate_bars("TCS", 20, base_price=100.0)
+    chk_v1 = compute_dataset_checksum(bars_v1)
+    rec_v1 = DatasetRecord(
+        dataset_id="pinned_ds",
+        name="TCS",
+        version="v1.0.0",
+        symbols=["TCS"],
+        start_date=bars_v1[0].timestamp,
+        end_date=bars_v1[-1].timestamp,
+        bar_count=len(bars_v1),
+        sha256_checksum=chk_v1,
+    )
+    store.register_dataset(rec_v1)
+    service.register_dataset_bars("pinned_ds", bars_v1, version="v1.0.0")
+
+    # Create experiment pinned to v1.0.0
+    exp_id = "exp_pinned_v1"
+    exp_def = ExperimentDefinition(
+        experiment_id=exp_id,
+        name="Pinned Test",
+        strategy_id="Canonical_SMA",
+        strategy_version="1.0.0",
+        dataset_id="pinned_ds",
+        dataset_version="v1.0.0",
+        dataset_checksum=chk_v1,
+        universe=["TCS"],
+        start_date=bars_v1[0].timestamp,
+        end_date=bars_v1[-1].timestamp,
+        initial_capital=100_000.0,
+    )
+    service.store.save_experiment(exp_def)
+
+    # Register v2.0.0 with different bars and checksum
+    bars_v2 = _generate_bars("TCS", 30, base_price=200.0)
+    chk_v2 = compute_dataset_checksum(bars_v2)
+    rec_v2 = DatasetRecord(
+        dataset_id="pinned_ds",
+        name="TCS",
+        version="v2.0.0",
+        symbols=["TCS"],
+        start_date=bars_v2[0].timestamp,
+        end_date=bars_v2[-1].timestamp,
+        bar_count=len(bars_v2),
+        sha256_checksum=chk_v2,
+    )
+    store.register_dataset(rec_v2)
+    service.register_dataset_bars("pinned_ds", bars_v2, version="v2.0.0")
+
+    # Run experiment
+    service.submit_backtest(
+        strategy_id="Canonical_SMA",
+        universe=["TCS"],
+        start_date=bars_v1[0].timestamp,
+        end_date=bars_v1[-1].timestamp,
+        initial_capital=100_000.0,
+        experiment_id=exp_id,
+        dataset_id="pinned_ds",
+        dataset_version="v1.0.0",
+        dataset_checksum=chk_v1,
+    )
+    status = _await_terminal_status(service, exp_id)
+    assert status["status"] == "COMPLETED"
+
+    # Verify run record in store is strictly pinned to v1.0.0 and chk_v1
+    stored_exp = service.store.get_experiment(exp_id)
+    assert stored_exp.dataset_version == "v1.0.0"
+    assert stored_exp.dataset_checksum == chk_v1
+
+
+def test_a08_contract_violations_fail_before_fills():
+    """A08: Quarantined dataset fails closed before order execution."""
+    store = DatasetRegistryStore(":memory:")
+    service = BacktestService(dataset_store=store)
+
+    bars = _generate_bars("RELIANCE", 20)
+    chk = compute_dataset_checksum(bars)
+    rec = DatasetRecord(
+        dataset_id="quarantine_ds",
+        name="Quarantine Test",
+        version="v1.0.0",
+        symbols=["RELIANCE"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        bar_count=len(bars),
+        sha256_checksum=chk,
+        quality_status=DataQualityStatus.VALID,
+    )
+    store.register_dataset(rec)
+    store.quarantine_dataset("quarantine_ds", "Suspected data corruption", version="v1.0.0")
+    service.register_dataset_bars("quarantine_ds", bars, version="v1.0.0")
+
+    exp_id = "exp_a08_quarantine"
+    service.submit_backtest(
+        strategy_id="Canonical_SMA",
+        universe=["RELIANCE"],
+        start_date=bars[0].timestamp,
+        end_date=bars[-1].timestamp,
+        initial_capital=100_000.0,
+        experiment_id=exp_id,
+        dataset_id="quarantine_ds",
+        dataset_version="v1.0.0",
+        dataset_checksum=chk,
+    )
+    status = _await_terminal_status(service, exp_id)
+    assert status["status"] == "FAILED"
+    events = [e["event_type"] for e in service.store.get_audit_events(exp_id)]
+    assert "DATASET_REJECTED" in events or "DATA_UNAVAILABLE" in events
+    assert len(service.store.get_trades(exp_id)) == 0
