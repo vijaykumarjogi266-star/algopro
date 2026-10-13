@@ -9,6 +9,15 @@ from data.schemas.contracts import Exchange, OHLCVBar, TimeFrame
 from services.market_data.storage import ParquetMarketDataStorage
 
 
+try:
+    import polars as pl
+    pl.Series([1])
+    HAS_POLARS = True
+except Exception:
+    HAS_POLARS = False
+
+
+@pytest.mark.skipif(not HAS_POLARS, reason="Polars binary unavailable in this environment")
 def test_parquet_storage_and_duckdb_point_in_time():
     with tempfile.TemporaryDirectory() as tmp_dir:
         storage = ParquetMarketDataStorage(base_dir=tmp_dir)

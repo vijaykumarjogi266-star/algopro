@@ -36,6 +36,7 @@ from apps.api.schemas.experiments import (
     RunResultResponse,
     AuditEventResponse,
 )
+from apps.api.core.auth import Role, require_researcher, require_reader
 
 router = APIRouter(prefix="/experiments", tags=["experiments"])
 
@@ -140,6 +141,7 @@ def validate_experiment(req: ExperimentValidateRequest):
 def create_experiment(
     req: ExperimentCreateRequest,
     service: BacktestService = Depends(get_service),
+    _role: Role = Depends(require_researcher),
 ):
     val = validate_experiment_payload(req)
     if not val.is_valid:
@@ -205,10 +207,12 @@ def get_experiment(
 
 
 @router.post("/{experiment_id}/submit", response_model=RunSubmitResponse, summary="Submit experiment for execution")
+@router.post("/{experiment_id}/runs", response_model=RunSubmitResponse, summary="Submit experiment run")
 def submit_experiment(
     experiment_id: str,
     idempotent: bool = Query(default=True, description="Enforce idempotency to prevent duplicate executions"),
     service: BacktestService = Depends(get_service),
+    _role: Role = Depends(require_researcher),
 ):
     exp = service.store.get_experiment(experiment_id)
     if not exp:

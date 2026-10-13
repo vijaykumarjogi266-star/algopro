@@ -1,0 +1,46 @@
+# Environment files & secrets
+.env
+.env.*
+!.env.example
+!.env.production.example
+*.pem
+*.key
+
+# Local databases & storage
+*.db
+*.sqlite
+*.sqlite3
+data/app.db
+algo_lab_paper.db
+
+# Virtual environments & python caches
+.venv
+venv
+env
+ENV
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache
+.coverage
+htmlcov
+coverage.xml
+
+# Git & IDEs
+.git
+.gitignore
+.github
+.idea
+.vscode
+
+# Frontend node_modules & build artifacts
+apps/web/node_modules
+apps/web/.next
+apps/web/out
+node_modules
+.next
+
+# Scratch & temporary artifacts
+scratch
+tmp

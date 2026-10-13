@@ -6,9 +6,10 @@ Adheres to Non-Negotiable Principles:
 """
 
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from apps.api.core.auth import Role, require_operator
 from services.paper_engine.adapters.credentials import (
     BrokerConnectionConfig,
     BrokerCredentialStore,
@@ -38,7 +39,10 @@ async def list_connections() -> List[Dict[str, Any]]:
 
 
 @router.post("/connections", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, summary="Create or update broker connection")
-async def save_connection(req: SaveConnectionRequest) -> Dict[str, Any]:
+async def save_connection(
+    req: SaveConnectionRequest,
+    _role: Role = Depends(require_operator),
+) -> Dict[str, Any]:
     """Saves a broker adapter configuration.
     
     Hard Security Check: Rejects LIVE environment fail-closed.
