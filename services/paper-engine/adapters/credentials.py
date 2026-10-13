@@ -126,6 +126,11 @@ def _resolve_fernet_key() -> Fernet:
         ) from exc
 
 
+class DecryptionError(RuntimeError):
+    """Raised when authenticated credential decryption fails or legacy plaintext is detected."""
+    pass
+
+
 class BrokerCredentialStore:
     """Thread-safe SQLite store for broker configurations with Fernet encryption at rest."""
 
@@ -153,18 +158,30 @@ class BrokerCredentialStore:
         return self._fernet.encrypt(plaintext.encode()).decode()
 
     def _decrypt(self, ciphertext: Optional[str]) -> Optional[str]:
-        """Decrypt a ciphertext string; returns None for None input.
+        """Decrypt an authenticated ciphertext string.
 
-        If the value is not encrypted (e.g., legacy plaintext), returns it as-is
-        with a warning so old records are still readable during migration.
+        Fail-closed rules:
+        - If ciphertext is None, returns None.
+        - If ciphertext is not a Fernet token (e.g. legacy plaintext), raises DecryptionError.
+        - If decryption fails (wrong key, tampering, or corruption), raises DecryptionError.
+        - NEVER returns raw ciphertext or plaintext fallback.
         """
         if ciphertext is None:
             return None
+        if not ciphertext:
+            return ""
+
+        if not ciphertext.startswith("gAAAAA"):
+            raise DecryptionError(
+                "Legacy plaintext credential detected; explicit migration required before access."
+            )
+
         try:
             return self._fernet.decrypt(ciphertext.encode()).decode()
-        except (InvalidToken, Exception):
-            logger.warning("Credential decryption failed for a stored value — possible legacy plaintext record.")
-            return ciphertext  # Preserve legacy plaintext during migration
+        except Exception as exc:
+            raise DecryptionError(
+                "Authenticated credential decryption failed: invalid token, wrong key, or tampered record."
+            ) from exc
 
     def _encrypt_extra_params(self, extra_params: Dict[str, Any]) -> str:
         """Encrypt sensitive extra_params values and serialize to JSON."""
@@ -300,7 +317,15 @@ class BrokerCredentialStore:
 
     def test_connection(self, connection_id: str) -> Dict[str, Any]:
         """Tests connectivity with the broker credentials."""
-        config = self.get_connection(connection_id)
+        try:
+            config = self.get_connection(connection_id)
+        except DecryptionError as exc:
+            return {
+                "connected": False,
+                "status": "DECRYPTION_FAILED",
+                "verification_level": "FAILED",
+                "message": f"Credential decryption failed: {exc}",
+            }
         if not config:
             return {"connected": False, "status": "NOT_FOUND", "message": "Connection ID not found"}
 
@@ -314,17 +339,9 @@ class BrokerCredentialStore:
                 "environment": config.environment.value,
             }
 
-        # For external brokers, perform explicit unverified sandbox check
-        if not config.api_key:
-            return {
-                "connected": False,
-                "status": "AUTH_FAILED",
-                "verification_level": "FAILED",
-                "message": "Missing API Key",
-            }
-
+        # For external brokers, never claim connected=True merely because an API key is present
         return {
-            "connected": True,
+            "connected": False,
             "status": "UNVERIFIED_SANDBOX",
             "verification_level": "UNVERIFIED_SANDBOX",
             "message": f"Credentials configured for {config.broker_name} ({config.environment.value}). Real broker execution is locked.",
@@ -345,3 +362,81 @@ class BrokerCredentialStore:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
+
+
+def migrate_plaintext_credentials(db_path: str, fernet: Optional[Fernet] = None) -> int:
+    """Migrates legacy plaintext broker credentials to Fernet-encrypted format.
+
+    Procedure:
+    1. Validates database exists.
+    2. Performs backup-first safety copy and validates with PRAGMA integrity_check.
+    3. Runs atomic transaction encrypting plaintext values.
+    4. If any step fails, rolls back and restores backup.
+    5. Security notice: Historical backups and SQLite WAL may retain plaintext copies;
+       rotate credentials with the broker provider after migration.
+    """
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"Database file not found: {db_path}")
+
+    cipher = fernet or _resolve_fernet_key()
+
+    # Backup-first: create verified backup
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{db_path}.backup_{timestamp}"
+
+    src = sqlite3.connect(db_path)
+    dst = sqlite3.connect(backup_path)
+    with dst:
+        src.backup(dst)
+    dst.close()
+    src.close()
+
+    # Verify backup integrity
+    verify_conn = sqlite3.connect(backup_path)
+    cur = verify_conn.execute("PRAGMA integrity_check")
+    if cur.fetchone()[0] != "ok":
+        verify_conn.close()
+        raise RuntimeError("Backup integrity check failed before migration.")
+    verify_conn.close()
+
+    # Atomic migration in transaction
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    migrated_count = 0
+    try:
+        with conn:
+            rows = conn.execute("SELECT * FROM broker_connections").fetchall()
+            for row in rows:
+                api_key = row["api_key"]
+                api_secret = row["api_secret"]
+
+                needs_update = False
+                enc_key = api_key
+                enc_secret = api_secret
+
+                if api_key and not api_key.startswith("gAAAAA"):
+                    enc_key = cipher.encrypt(api_key.encode()).decode()
+                    needs_update = True
+                if api_secret and not api_secret.startswith("gAAAAA"):
+                    enc_secret = cipher.encrypt(api_secret.encode()).decode()
+                    needs_update = True
+
+                if needs_update:
+                    conn.execute("""
+                    UPDATE broker_connections
+                    SET api_key = ?, api_secret = ?, updated_at = ?
+                    WHERE connection_id = ?
+                    """, (enc_key, enc_secret, datetime.now(timezone.utc).isoformat(), row["connection_id"]))
+                    migrated_count += 1
+    except Exception as exc:
+        conn.close()
+        shutil.copy2(backup_path, db_path)
+        raise RuntimeError(f"Migration failed and was rolled back to backup: {exc}") from exc
+    finally:
+        conn.close()
+
+    logger.info(
+        f"Successfully migrated {migrated_count} broker connections to encrypted storage. "
+        f"Backup preserved at {backup_path}. Rotate broker keys to invalidate old plaintext records."
+    )
+    return migrated_count

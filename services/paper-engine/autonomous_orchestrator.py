@@ -8,6 +8,7 @@ import sys
 import time
 import shutil
 import sqlite3
+import tempfile
 import json
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
@@ -36,6 +37,72 @@ NSE_HOLIDAYS_2026 = {
     "2026-11-08",  # Diwali Laxmi Pujan
     "2026-12-25",  # Christmas
 }
+
+
+def perform_safe_database_backup(src_db_path: str, backup_dir: str, target_filename: Optional[str] = None) -> str:
+    """Safely back up an active SQLite database (with WAL support).
+
+    - Writes to a temporary destination first.
+    - Captures active WAL transactions via SQLite backup API.
+    - Verifies backup integrity with PRAGMA integrity_check.
+    - Atomically publishes to final destination.
+    - NEVER falls back to unsafe raw file copy on active WAL database.
+    - Preserves previous valid backups if backup fails.
+    """
+    if not os.path.exists(src_db_path):
+        raise FileNotFoundError(f"Source database not found: {src_db_path}")
+
+    os.makedirs(backup_dir, exist_ok=True)
+    today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    final_filename = target_filename or f"paper_trading_{today_str}.db"
+    final_path = os.path.join(backup_dir, final_filename)
+
+    with tempfile.NamedTemporaryFile(dir=backup_dir, delete=False, suffix=".tmp") as tf:
+        temp_path = tf.name
+
+    src_conn = None
+    dst_conn = None
+    try:
+        src_conn = sqlite3.connect(src_db_path)
+        src_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        dst_conn = sqlite3.connect(temp_path)
+        with dst_conn:
+            src_conn.backup(dst_conn)
+        dst_conn.close()
+        dst_conn = None
+        src_conn.close()
+        src_conn = None
+
+        # Verify backup integrity
+        verify_conn = sqlite3.connect(temp_path)
+        cur = verify_conn.execute("PRAGMA integrity_check")
+        status = cur.fetchone()[0]
+        verify_conn.close()
+        if status != "ok":
+            raise RuntimeError(f"Backup failed SQLite integrity check: {status}")
+
+        # Atomically publish verified backup
+        os.replace(temp_path, final_path)
+        logger.info(f"Safe database backup atomically published: {final_path}")
+        return final_path
+    except Exception as exc:
+        if dst_conn:
+            try:
+                dst_conn.close()
+            except Exception:
+                pass
+        if src_conn:
+            try:
+                src_conn.close()
+            except Exception:
+                pass
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        logger.error(f"Safe database backup failed: {exc}")
+        raise
 
 
 class AutonomousSentinel:
@@ -105,25 +172,14 @@ class AutonomousSentinel:
         logger.info("Executing 08:30 IST Pre-Market Maintenance...")
         self.is_killswitch_tripped = False  # Reset daily killswitch for new trading day
         
-        # 1. Database backup via SQLite online backup API (captures active WAL transactions consistently)
+        # 1. Database backup via safe online backup API (captures active WAL transactions consistently)
         if os.path.exists(self.db_path):
             backup_dir = os.path.join(PROJECT_ROOT, "data", "backups")
-            os.makedirs(backup_dir, exist_ok=True)
             today_str = self.get_ist_now().strftime("%Y%m%d")
-            backup_file = os.path.join(backup_dir, f"paper_trading_{today_str}.db")
             try:
-                src_conn = sqlite3.connect(self.db_path)
-                # Checkpoint WAL first
-                src_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                dst_conn = sqlite3.connect(backup_file)
-                with dst_conn:
-                    src_conn.backup(dst_conn)
-                dst_conn.close()
-                src_conn.close()
-                logger.info(f"Database backed up via SQLite backup API to {backup_file}")
+                perform_safe_database_backup(self.db_path, backup_dir, target_filename=f"paper_trading_{today_str}.db")
             except Exception as e:
-                logger.error(f"Online backup failed: {e}. Falling back to copy2.")
-                shutil.copy2(self.db_path, backup_file)
+                logger.error(f"Pre-market database backup failed: {e}")
 
         # 2. Retrieve latest strategy decision allocated by Research Bot
         decision = self.get_latest_strategy_decision()

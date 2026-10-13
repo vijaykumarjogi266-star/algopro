@@ -79,6 +79,7 @@ class CircuitBreakerConfig:
     max_single_order_qty: int = 1_000_000       # Max shares per single order (1,000,000)
     rearm_secret: Optional[str] = field(default=None, repr=False)
     rearm_secret_hash: Optional[str] = field(default=None, repr=False)
+    state_integrity_key: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self):
         for name, val in [

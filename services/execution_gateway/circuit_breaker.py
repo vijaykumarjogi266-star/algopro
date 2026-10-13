@@ -64,6 +64,23 @@ class CircuitBreakerEngine:
         else:
             self._rearm_secret_digest = hashlib.sha256(secret.encode("utf-8")).digest()
 
+        # Dedicated independent state integrity key (NEVER reuse rearm secret, NO static fallback)
+        integrity_key = self.config.state_integrity_key or os.environ.get("CIRCUIT_BREAKER_STATE_KEY")
+        if not integrity_key:
+            if env in ("production", "prod", "staging") and self.state_file_path:
+                raise RuntimeError(
+                    "Production circuit breaker startup failed closed: "
+                    "CIRCUIT_BREAKER_STATE_KEY must be configured for persistent state integrity."
+                )
+            # Use random ephemeral key in non-production (unique per process, never static)
+            self._state_integrity_key: bytes = secrets.token_bytes(32)
+        elif isinstance(integrity_key, str):
+            self._state_integrity_key = integrity_key.encode("latin1")
+        else:
+            self._state_integrity_key = bytes(integrity_key)
+
+        self._persistence_error: Optional[str] = None
+
         # Monotonic time tracking for watchdog & rate limiter
         self._last_heartbeat_monotonic = time.monotonic()
         self._rate_limiter_deque: deque[float] = deque()
@@ -166,6 +183,27 @@ class CircuitBreakerEngine:
 
             self._rate_limiter_deque.append(now_mono)
 
+    def evaluate_drawdown(self, current_equity: float) -> GatewayState:
+        """Alias for update_equity to evaluate drawdown and daily loss."""
+        return self.update_equity(current_equity)
+
+    def validate_order(self, order: OrderPayload) -> None:
+        """Validate order submission against circuit breaker state, single order limit, and rate limit."""
+        with self._lock:
+            if self._state == GatewayState.EMERGENCY_HALT:
+                raise CircuitBreakerTripped(
+                    f"Gateway in EMERGENCY_HALT: {', '.join(self._trip_reasons)}"
+                )
+            if self._persistence_error:
+                raise CircuitBreakerTripped(
+                    f"Gateway state persistence failed: {self._persistence_error}"
+                )
+            if abs(order.quantity) > self.config.max_single_order_qty:
+                raise ValueError(
+                    f"Order quantity {order.quantity} exceeds max_single_order_qty ({self.config.max_single_order_qty})"
+                )
+        self.validate_rate_limit()
+
     def trigger_emergency_halt(self, reason: str = "MANUAL_EMERGENCY_HALT") -> None:
         """Explicitly trigger emergency halt."""
         with self._lock:
@@ -196,16 +234,37 @@ class CircuitBreakerEngine:
                 )
                 return False
 
-            logger.info(
-                "Circuit breaker rearm accepted: Gateway restored to NORMAL",
-                extra={"audit_event": "CIRCUIT_BREAKER_REARM_SUCCESS"},
-            )
+            # Snapshot current state before attempting durable transition
+            saved_state = self._state
+            saved_reasons = list(self._trip_reasons)
+            saved_hwm = self._high_water_mark
+            saved_baseline = self._day_start_equity
+
+            # Attempt durable clearance first
+            try:
+                self._clear_disk_state()
+            except Exception as e:
+                logger.error(
+                    "Circuit breaker rearm failed: durable state persistence failed",
+                    extra={"audit_event": "CIRCUIT_BREAKER_REARM_FAILED", "error": str(e)},
+                )
+                # Keep engine halted and preserve existing reasons/snapshots
+                self._state = saved_state
+                self._trip_reasons = saved_reasons
+                self._high_water_mark = saved_hwm
+                self._day_start_equity = saved_baseline
+                return False
+
+            # Emit success audit ONLY after durable transition succeeds
             self._state = GatewayState.NORMAL
             self._trip_reasons.clear()
             self._high_water_mark = self._current_equity
             self._day_start_equity = self._current_equity
             self._last_heartbeat_monotonic = time.monotonic()
-            self._clear_disk_state()
+            logger.info(
+                "Circuit breaker rearm accepted: Gateway restored to NORMAL",
+                extra={"audit_event": "CIRCUIT_BREAKER_REARM_SUCCESS"},
+            )
             return True
 
     def _trip_halt_locked(self, reason: str) -> None:
@@ -222,14 +281,16 @@ class CircuitBreakerEngine:
             return
         try:
             payload = {
+                "schema_version": 1,
                 "gateway_state": self._state.value,
-                "trip_reasons": self._trip_reasons,
+                "trip_reasons": list(self._trip_reasons),
+                "high_water_mark": float(self._high_water_mark),
+                "day_start_equity": float(self._day_start_equity),
+                "current_equity": float(self._current_equity),
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             }
             content = json.dumps(payload, sort_keys=True)
-            # Use keyed HMAC digest if secret is available, or SHA-256 fallback
-            key = self._rearm_secret_digest or b"default_algo_lab_integrity_key"
-            digest = hmac.new(key, content.encode("utf-8"), hashlib.sha256).hexdigest()
+            digest = hmac.new(self._state_integrity_key, content.encode("utf-8"), hashlib.sha256).hexdigest()
             payload["hmac_digest"] = digest
 
             dir_name = os.path.dirname(self.state_file_path)
@@ -245,8 +306,12 @@ class CircuitBreakerEngine:
                 temp_name = tf.name
 
             os.replace(temp_name, self.state_file_path)
+            self._persistence_error = None
         except Exception as e:
-            logger.warning(
+            self._persistence_error = str(e)
+            if "PERSISTENCE_FAILURE" not in self._trip_reasons:
+                self._trip_reasons.append(f"PERSISTENCE_FAILURE: {str(e)}")
+            logger.error(
                 "Failed to persist circuit breaker state to disk",
                 extra={"error": str(e), "state_path": self.state_file_path},
             )
@@ -269,18 +334,37 @@ class CircuitBreakerEngine:
                 data = json.load(f)
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
-            # Validate keyed HMAC integrity if present
-            if "hmac_digest" in data:
-                expected_hmac = data.pop("hmac_digest")
-                content = json.dumps(data, sort_keys=True)
-                key = self._rearm_secret_digest or b"default_algo_lab_integrity_key"
-                computed = hmac.new(key, content.encode("utf-8"), hashlib.sha256).hexdigest()
-                if not hmac.compare_digest(expected_hmac, computed):
-                    raise ValueError("Keyed HMAC digest mismatch on persisted state file (tampering detected)")
+            if not isinstance(data, dict):
+                raise ValueError("State file content is not a JSON object")
 
-            if data.get("gateway_state") == GatewayState.EMERGENCY_HALT.value:
+            # Validate HMAC digest existence
+            if "hmac_digest" not in data:
+                raise ValueError("Persisted state file is unsigned (tampering detected)")
+
+            expected_hmac = data.pop("hmac_digest")
+            content = json.dumps(data, sort_keys=True)
+            computed = hmac.new(self._state_integrity_key, content.encode("utf-8"), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expected_hmac, computed):
+                raise ValueError("Keyed HMAC digest mismatch on persisted state file (tampering detected)")
+
+            # Validate Schema
+            if data.get("schema_version") != 1:
+                raise ValueError(f"Unsupported schema_version: {data.get('schema_version')}")
+
+            raw_state = data.get("gateway_state")
+            if raw_state not in [e.value for e in GatewayState]:
+                raise ValueError(f"Unknown gateway_state: {raw_state}")
+
+            reasons = data.get("trip_reasons")
+            if not isinstance(reasons, list) or not all(isinstance(r, str) for r in reasons):
+                raise ValueError("trip_reasons must be a list of strings")
+
+            if raw_state == GatewayState.EMERGENCY_HALT.value:
                 self._state = GatewayState.EMERGENCY_HALT
-                self._trip_reasons = data.get("trip_reasons", ["PERSISTED_DISK_HALT"])
+                self._trip_reasons = list(reasons) or ["PERSISTED_DISK_HALT"]
+                self._high_water_mark = float(data.get("high_water_mark", self._high_water_mark))
+                self._day_start_equity = float(data.get("day_start_equity", self._day_start_equity))
+                self._current_equity = float(data.get("current_equity", self._current_equity))
         except Exception as e:
             logger.error(
                 "Failed to restore circuit breaker disk state; failing closed to EMERGENCY_HALT",
