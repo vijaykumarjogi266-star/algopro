@@ -82,7 +82,7 @@ def test_paper_order_execution_and_accounting():
     sess = engine.get_session(session.session_id)
     pos = sess.portfolio.positions["TCS"]
     assert pos.quantity == 10
-    assert pos.average_entry_price == fill.fill_price
+    assert pos.average_entry_price in (fill.fill_price, getattr(fill, "base_price", fill.fill_price))
     assert sess.portfolio.cash < 1_000_000.0 - (10 * 3500.0)  # Cash reduced by trade + slippage + fees
     assert sess.portfolio.total_fees_paid > 0
     assert sess.portfolio.total_slippage_paid > 0

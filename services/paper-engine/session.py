@@ -94,6 +94,11 @@ class PaperPortfolio(BaseModel):
     total_slippage_paid: float = 0.0
     peak_equity: float = Field(gt=0.0)
     max_drawdown_pct: float = 0.0
+    day_start_equity: float = 0.0
+    daily_pnl: float = 0.0
+    cumulative_pnl: float = 0.0
+    high_water_mark: float = 0.0
+    lifetime_trades: int = 0
 
     @classmethod
     def initialize(cls, capital: float) -> "PaperPortfolio":
@@ -101,6 +106,11 @@ class PaperPortfolio(BaseModel):
             initial_capital=capital,
             cash=capital,
             peak_equity=capital,
+            high_water_mark=capital,
+            day_start_equity=capital,
+            daily_pnl=0.0,
+            cumulative_pnl=0.0,
+            lifetime_trades=0,
         )
 
     @property
@@ -112,6 +122,32 @@ class PaperPortfolio(BaseModel):
         """Cash + Open Positions Value."""
         return round(self.cash + self.market_value_of_positions, 4)
 
+    def reset_daily_metrics(self, session_open_equity: Optional[float] = None):
+        """Resets daily-scoped metrics at session open boundary, while preserving lifetime metrics."""
+        eq = session_open_equity if session_open_equity is not None else self.total_equity
+        self.day_start_equity = eq
+        self.daily_pnl = 0.0
+
+    def _update_pnl_and_hwm(self):
+        current_eq = self.total_equity
+        if self.high_water_mark <= 0.0 and self.peak_equity > 0.0:
+            self.high_water_mark = self.peak_equity
+        if current_eq > self.high_water_mark:
+            self.high_water_mark = current_eq
+        if current_eq > self.peak_equity:
+            self.peak_equity = current_eq
+
+        if self.high_water_mark > 0:
+            dd = (self.high_water_mark - current_eq) / self.high_water_mark
+            if dd > self.max_drawdown_pct:
+                self.max_drawdown_pct = round(dd, 4)
+
+        self.cumulative_pnl = round(current_eq - self.initial_capital, 4)
+        if self.day_start_equity > 0:
+            self.daily_pnl = round(current_eq - self.day_start_equity, 4)
+        else:
+            self.daily_pnl = round(current_eq - self.initial_capital, 4)
+
     def mark_to_market(self, prices: Dict[str, float]):
         """Updates prices and marks all active positions to market."""
         total_unrealized = 0.0
@@ -121,23 +157,24 @@ class PaperPortfolio(BaseModel):
                 total_unrealized += pos.unrealized_pnl
 
         self.total_unrealized_pnl = round(total_unrealized, 4)
-        current_eq = self.total_equity
-        if current_eq > self.peak_equity:
-            self.peak_equity = current_eq
-
-        if self.peak_equity > 0:
-            dd = (self.peak_equity - current_eq) / self.peak_equity
-            if dd > self.max_drawdown_pct:
-                self.max_drawdown_pct = round(dd, 4)
+        self._update_pnl_and_hwm()
 
     def on_fill(self, fill: ExecutionFill):
-        """Applies an execution fill to the portfolio maintaining financial accounting invariants."""
+        """Applies an execution fill to the portfolio maintaining financial accounting invariants.
+        
+        Slippage arithmetic:
+        - Deducted once on cash flow (cash outflow = quantity * base_price + transaction_costs + slippage_cost).
+        - Not double-counted inside position cost basis (cost basis = quantity * base_price).
+        """
         sym = fill.symbol.upper()
         self.total_fees_paid = round(self.total_fees_paid + fill.transaction_costs, 4)
         self.total_slippage_paid = round(self.total_slippage_paid + fill.slippage_cost, 4)
+        self.lifetime_trades += 1
+
+        base_price = getattr(fill, "base_price", fill.fill_price)
 
         if fill.side == OrderSide.BUY:
-            total_outflow = fill.net_traded_value + fill.transaction_costs
+            total_outflow = round((fill.quantity * base_price) + fill.transaction_costs + fill.slippage_cost, 4)
             if self.cash < total_outflow:
                 raise ValueError(
                     f"Defensive cash invariant violation: Available cash INR {self.cash:.2f} "
@@ -151,9 +188,9 @@ class PaperPortfolio(BaseModel):
                     symbol=sym,
                     side=OrderSide.BUY,
                     quantity=fill.quantity,
-                    average_entry_price=fill.fill_price,
+                    average_entry_price=base_price,
                     current_price=fill.fill_price,
-                    cost_basis=round(fill.quantity * fill.fill_price, 4),
+                    cost_basis=round(fill.quantity * base_price, 4),
                     market_value=round(fill.quantity * fill.fill_price, 4),
                     fees_paid=fill.transaction_costs,
                     slippage_paid=fill.slippage_cost,
@@ -161,7 +198,7 @@ class PaperPortfolio(BaseModel):
             else:
                 # Average into existing long
                 new_qty = pos.quantity + fill.quantity
-                new_cost = pos.cost_basis + (fill.quantity * fill.fill_price)
+                new_cost = pos.cost_basis + (fill.quantity * base_price)
                 pos.average_entry_price = round(new_cost / new_qty, 4)
                 pos.quantity = new_qty
                 pos.cost_basis = round(new_cost, 4)
@@ -175,11 +212,11 @@ class PaperPortfolio(BaseModel):
             if pos is not None and pos.quantity > 0:
                 closed_qty = min(pos.quantity, fill.quantity)
                 cost_of_closed = closed_qty * pos.average_entry_price
-                proceeds = closed_qty * fill.fill_price
+                proceeds = closed_qty * base_price
                 realized_gross = proceeds - cost_of_closed
                 self.total_realized_pnl = round(self.total_realized_pnl + realized_gross, 4)
 
-                net_inflow = (fill.quantity * fill.fill_price) - fill.transaction_costs
+                net_inflow = (fill.quantity * base_price) - fill.slippage_cost - fill.transaction_costs
                 self.cash = round(self.cash + net_inflow, 4)
 
                 rem_qty = pos.quantity - closed_qty
@@ -192,12 +229,10 @@ class PaperPortfolio(BaseModel):
                     pos.current_price = fill.fill_price
             else:
                 # Zero existing position, receive proceeds
-                net_inflow = (fill.quantity * fill.fill_price) - fill.transaction_costs
+                net_inflow = (fill.quantity * base_price) - fill.slippage_cost - fill.transaction_costs
                 self.cash = round(self.cash + net_inflow, 4)
 
-        current_eq = self.total_equity
-        if current_eq > self.peak_equity:
-            self.peak_equity = current_eq
+        self._update_pnl_and_hwm()
 
 
 class PaperSession(BaseModel):
@@ -219,6 +254,11 @@ class PaperSession(BaseModel):
     orders: List[ExecutionOrder] = Field(default_factory=list)
     fills: List[ExecutionFill] = Field(default_factory=list)
     error_message: Optional[str] = None
+
+    @property
+    def ledger_entries(self) -> List[ExecutionFill]:
+        """Immutable historical ledger of executed fills."""
+        return list(self.fills)
 
 
 class PaperTradingEngine:
@@ -286,9 +326,18 @@ class PaperTradingEngine:
                     created_at TEXT NOT NULL,
                     started_at TEXT,
                     stopped_at TEXT,
-                    error_message TEXT
+                    error_message TEXT,
+                    orders_data TEXT,
+                    fills_data TEXT
                 )
                 """)
+                cursor = conn.execute("PRAGMA table_info(paper_sessions)")
+                cols = [r[1] for r in cursor.fetchall()]
+                if "orders_data" not in cols:
+                    conn.execute("ALTER TABLE paper_sessions ADD COLUMN orders_data TEXT")
+                if "fills_data" not in cols:
+                    conn.execute("ALTER TABLE paper_sessions ADD COLUMN fills_data TEXT")
+
 
     def create_session(
         self,
@@ -384,6 +433,18 @@ class PaperTradingEngine:
         session = self.get_session(session_id)
         return list(session.orders) if session else []
 
+    def reset_daily_metrics(
+        self, session_id: str, session_open_equity: Optional[float] = None
+    ) -> PaperSession:
+        """Reset daily PnL and daily baseline at session open boundary."""
+        with self._lock:
+            session = self.get_session(session_id)
+            if not session:
+                raise ValueError(f"Session {session_id} not found.")
+            session.portfolio.reset_daily_metrics(session_open_equity)
+            self._persist_session(session)
+            return session
+
     def submit_manual_order(
         self,
         session_id: str,
@@ -471,20 +532,25 @@ class PaperTradingEngine:
 
     def _persist_session(self, session: PaperSession):
         conn = self._get_connection()
+        orders_json = json.dumps([o.model_dump(mode="json") for o in session.orders])
+        fills_json = json.dumps([f.model_dump(mode="json") for f in session.fills])
         with conn:
             conn.execute("""
             INSERT INTO paper_sessions (
                 session_id, name, strategy_id, strategy_version, universe,
                 initial_capital, status, broker_connection_id, portfolio_data,
-                events_count, created_at, started_at, stopped_at, error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                events_count, created_at, started_at, stopped_at, error_message,
+                orders_data, fills_data
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 status = excluded.status,
                 portfolio_data = excluded.portfolio_data,
                 events_count = excluded.events_count,
                 started_at = excluded.started_at,
                 stopped_at = excluded.stopped_at,
-                error_message = excluded.error_message
+                error_message = excluded.error_message,
+                orders_data = excluded.orders_data,
+                fills_data = excluded.fills_data
             """, (
                 session.session_id,
                 session.name,
@@ -500,9 +566,25 @@ class PaperTradingEngine:
                 session.started_at.isoformat() if session.started_at else None,
                 session.stopped_at.isoformat() if session.stopped_at else None,
                 session.error_message,
+                orders_json,
+                fills_json,
             ))
 
     def _row_to_session(self, row: sqlite3.Row) -> PaperSession:
+        keys = row.keys()
+        orders = []
+        if "orders_data" in keys and row["orders_data"]:
+            try:
+                orders = [ExecutionOrder.model_validate(o) for o in json.loads(row["orders_data"])]
+            except Exception:
+                orders = []
+        fills = []
+        if "fills_data" in keys and row["fills_data"]:
+            try:
+                fills = [ExecutionFill.model_validate(f) for f in json.loads(row["fills_data"])]
+            except Exception:
+                fills = []
+
         return PaperSession(
             session_id=row["session_id"],
             name=row["name"],
@@ -514,8 +596,11 @@ class PaperTradingEngine:
             status=SessionStatus(row["status"]),
             broker_connection_id=row["broker_connection_id"],
             events_count=row["events_count"],
+            orders=orders,
+            fills=fills,
             created_at=datetime.fromisoformat(row["created_at"]),
             started_at=datetime.fromisoformat(row["started_at"]) if row["started_at"] else None,
             stopped_at=datetime.fromisoformat(row["stopped_at"]) if row["stopped_at"] else None,
             error_message=row["error_message"],
         )
+

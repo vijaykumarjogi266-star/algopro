@@ -14,6 +14,7 @@ import os
 import sqlite3
 import time
 import math
+from enum import Enum
 from datetime import datetime, timezone, timedelta, date
 from typing import Dict, Optional, Tuple, Any
 import pandas as pd
@@ -37,6 +38,64 @@ def get_ist_now(now_dt: Optional[datetime] = None) -> datetime:
 def get_ist_session_date(now_dt: Optional[datetime] = None) -> str:
     """Return the current IST exchange trading session date formatted as YYYY-MM-DD."""
     return get_ist_now(now_dt).strftime("%Y-%m-%d")
+
+
+class DaemonPhase(str, Enum):
+    PREMARKET = "PREMARKET"
+    REGULAR = "REGULAR"
+    POST_MARKET_EOD = "POST_MARKET_EOD"
+    MAINTENANCE = "MAINTENANCE"
+
+
+def get_daemon_phase(
+    dt_ist: Optional[datetime] = None,
+    is_market_day: bool = True,
+) -> DaemonPhase:
+    """Return the scheduled daemon phase based on IST time.
+
+    Phases:
+      PREMARKET:       09:00 - 09:15 IST (on market day)
+      REGULAR:         09:15 - 15:15 IST (on market day)
+      POST_MARKET_EOD: 15:15 - 15:30 IST (on market day)
+      MAINTENANCE:     All other times, weekends, and holidays
+    """
+    if not is_market_day:
+        return DaemonPhase.MAINTENANCE
+    ist_dt = get_ist_now(dt_ist)
+    minutes = ist_dt.hour * 60 + ist_dt.minute
+    if 9 * 60 <= minutes < 9 * 60 + 15:
+        return DaemonPhase.PREMARKET
+    elif 9 * 60 + 15 <= minutes < 15 * 60 + 15:
+        return DaemonPhase.REGULAR
+    elif 15 * 60 + 15 <= minutes < 15 * 60 + 30:
+        return DaemonPhase.POST_MARKET_EOD
+    else:
+        return DaemonPhase.MAINTENANCE
+
+
+def validate_manifest(
+    manifest: Optional[dict],
+    current_session_date: str,
+) -> Tuple[bool, Optional[str]]:
+    """Validate Strategy Allocation Manifest.
+
+    Checks:
+    1. Manifest is present and selected_strategy != 'WAIT'.
+    2. risk_multiplier is finite and > 0.
+    3. Target session date matches current trading session date exactly.
+    """
+    if not manifest or not isinstance(manifest, dict):
+        return False, "Missing or non-dict manifest"
+    strat = manifest.get("selected_strategy")
+    if not strat or strat == "WAIT":
+        return False, f"Strategy is WAIT or empty: {strat}"
+    rm = manifest.get("risk_multiplier")
+    if not isinstance(rm, (int, float)) or not math.isfinite(rm) or rm <= 0:
+        return False, f"Invalid risk multiplier: {rm}"
+    target_date = manifest.get("target_session_date") or manifest.get("session_date") or manifest.get("date")
+    if not target_date or target_date != current_session_date:
+        return False, f"Target session date '{target_date}' does not match current session '{current_session_date}'"
+    return True, None
 
 
 # Lazy yfinance import helper to prevent import-time failure
@@ -110,27 +169,36 @@ def load_sentinel_state(db_path: str) -> Dict[str, dict]:
             key TEXT PRIMARY KEY,
             value REAL NOT NULL,
             updated_at TEXT NOT NULL,
-            session_date TEXT
+            session_date TEXT,
+            text_value TEXT
         )
     """)
     cursor = conn.execute("PRAGMA table_info(sentinel_state)")
     cols = [r[1] for r in cursor.fetchall()]
     if "session_date" not in cols:
         conn.execute("ALTER TABLE sentinel_state ADD COLUMN session_date TEXT")
+    if "text_value" not in cols:
+        conn.execute("ALTER TABLE sentinel_state ADD COLUMN text_value TEXT")
     conn.commit()
 
-    cursor = conn.execute("SELECT key, value, updated_at, session_date FROM sentinel_state")
+    cursor = conn.execute("SELECT key, value, updated_at, session_date, text_value FROM sentinel_state")
     rows = {}
     for r in cursor.fetchall():
         s_date = r[3] if r[3] else (r[2][:10] if r[2] else "")
-        rows[r[0]] = {"value": r[1], "date": r[2][:10] if r[2] else "", "session_date": s_date}
+        rows[r[0]] = {"value": r[1], "date": r[2][:10] if r[2] else "", "session_date": s_date, "text_value": r[4]}
     conn.close()
     return rows
 
 _load_sentinel_state = load_sentinel_state
 
 
-def save_sentinel_state(db_path: str, key: str, value: float, session_date: Optional[str] = None) -> None:
+def save_sentinel_state(
+    db_path: str,
+    key: str,
+    value: float,
+    session_date: Optional[str] = None,
+    text_value: Optional[str] = None,
+) -> None:
     """Persist a sentinel state value to SQLite. Raises on database failure."""
     now_iso = datetime.now(timezone.utc).isoformat()
     if session_date is None:
@@ -141,18 +209,21 @@ def save_sentinel_state(db_path: str, key: str, value: float, session_date: Opti
             key TEXT PRIMARY KEY,
             value REAL NOT NULL,
             updated_at TEXT NOT NULL,
-            session_date TEXT
+            session_date TEXT,
+            text_value TEXT
         )
     """)
     cursor = conn.execute("PRAGMA table_info(sentinel_state)")
     cols = [r[1] for r in cursor.fetchall()]
     if "session_date" not in cols:
         conn.execute("ALTER TABLE sentinel_state ADD COLUMN session_date TEXT")
+    if "text_value" not in cols:
+        conn.execute("ALTER TABLE sentinel_state ADD COLUMN text_value TEXT")
 
     conn.execute(
-        "INSERT INTO sentinel_state(key, value, updated_at, session_date) VALUES(?,?,?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, session_date=excluded.session_date",
-        (key, value, now_iso, session_date),
+        "INSERT INTO sentinel_state(key, value, updated_at, session_date, text_value) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, session_date=excluded.session_date, text_value=excluded.text_value",
+        (key, value, now_iso, session_date, text_value),
     )
     conn.commit()
     conn.close()
@@ -288,6 +359,7 @@ class DaemonController:
         universe: Optional[list] = None,
         risk_limits: Optional[HardRiskLimits] = None,
         sentinel: Optional[AutonomousSentinel] = None,
+        circuit_breaker: Optional[Any] = None,
     ):
         self.db_path = db_path
         self.initial_capital = initial_capital
@@ -307,7 +379,12 @@ class DaemonController:
         self.risk_auditor = ContinuousRiskAuditor(limits=self.risk_limits)
 
         self.lifecycle_manager = ExecutionLifecycleManager(risk_engine=self.risk_engine)
-        self.paper_engine = PaperTradingEngine(self.db_path, lifecycle_manager=self.lifecycle_manager)
+        self.circuit_breaker = circuit_breaker
+        self.paper_engine = PaperTradingEngine(
+            self.db_path,
+            lifecycle_manager=self.lifecycle_manager,
+            circuit_breaker=self.circuit_breaker,
+        )
 
         self.sentinel = sentinel or AutonomousSentinel(
             db_path=self.db_path,
@@ -322,6 +399,115 @@ class DaemonController:
         self.trade_stops = {}
         self.trade_targets = {}
         self.trade_entry_times = {}
+        self.last_valid_quotes: Dict[str, float] = {}
+
+        self._is_emergency_halted = False
+        self._emergency_halt_reason: Optional[str] = None
+
+    @property
+    def is_halted(self) -> bool:
+        if self.circuit_breaker is not None and getattr(self.circuit_breaker, "is_halted", False):
+            return True
+        return self._is_emergency_halted
+
+    @property
+    def halt_reason(self) -> Optional[str]:
+        if self.circuit_breaker is not None and getattr(self.circuit_breaker, "is_halted", False):
+            reasons = getattr(self.circuit_breaker, "trip_reasons", [])
+            return ", ".join(reasons) if reasons else "CIRCUIT_BREAKER_EMERGENCY_HALT"
+        return self._emergency_halt_reason
+
+    def trigger_emergency_halt(self, reason: str = "MANUAL_EMERGENCY_HALT") -> None:
+        self._is_emergency_halted = True
+        self._emergency_halt_reason = reason
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.trigger_emergency_halt(reason)
+        save_sentinel_state(self.db_path, "emergency_halt", 1.0, session_date=self.current_session_date, text_value=reason)
+
+    def admin_rearm(self, auth_token: str) -> bool:
+        cb_ok = True
+        if self.circuit_breaker is not None:
+            cb_ok = self.circuit_breaker.admin_rearm(auth_token)
+        if cb_ok:
+            self._is_emergency_halted = False
+            self._emergency_halt_reason = None
+            self.sentinel.is_killswitch_tripped = False
+            save_sentinel_state(self.db_path, "emergency_halt", 0.0, session_date=self.current_session_date, text_value="")
+            return True
+        return False
+
+    def get_phase(self, current_time: Optional[datetime] = None) -> DaemonPhase:
+        ist_now = get_ist_now(current_time)
+        is_mkt = self.sentinel.is_market_day(ist_now)
+        return get_daemon_phase(ist_now, is_mkt)
+
+    def square_off_open_positions(
+        self,
+        market_prices: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """Square off open intraday paper positions using last available valid quotes.
+
+        Principle: If market closed or no valid quote exists, log error rather than inventing synthetic quotes.
+        """
+        prices = market_prices or {}
+        squared_off = []
+        errors = []
+
+        if not self.session or not self.session.portfolio.positions:
+            return {"squared_off": squared_off, "errors": errors, "remaining": 0}
+
+        for sym, pos in list(self.session.portfolio.positions.items()):
+            if pos.quantity <= 0:
+                continue
+
+            sym_key = sym.upper()
+            quote_price = (
+                prices.get(sym)
+                or prices.get(sym_key)
+                or self.last_valid_quotes.get(sym)
+                or self.last_valid_quotes.get(sym_key)
+            )
+
+            if (
+                quote_price is None
+                or not isinstance(quote_price, (int, float))
+                or not math.isfinite(quote_price)
+                or quote_price <= 0
+            ):
+                err_msg = f"Cannot square off {sym}: no valid quote available. Refusing to invent synthetic quote."
+                log_msg(f"[ERROR] {err_msg}")
+                errors.append({"symbol": sym, "error": err_msg})
+                continue
+
+            try:
+                order, fill = self.paper_engine.submit_manual_order(
+                    session_id=self.session.session_id,
+                    symbol=sym,
+                    side=OrderSide.SELL,
+                    quantity=pos.quantity,
+                    price=float(quote_price),
+                )
+                self.session = self.paper_engine.get_session(self.session.session_id)
+                self.trade_stops.pop(sym_key, None)
+                self.trade_targets.pop(sym_key, None)
+                self.trade_entry_times.pop(sym_key, None)
+                squared_off.append({
+                    "symbol": sym,
+                    "quantity": pos.quantity,
+                    "price": float(quote_price),
+                    "fill": fill is not None,
+                })
+                log_msg(f"[SQUARE-OFF] Squared off {pos.quantity} of {sym} at valid quote INR {quote_price:.2f}.")
+            except Exception as e:
+                err_msg = f"Failed to submit square-off order for {sym}: {e}"
+                log_msg(f"[ERROR] {err_msg}")
+                errors.append({"symbol": sym, "error": err_msg})
+
+        return {
+            "squared_off": squared_off,
+            "errors": errors,
+            "remaining": len(self.session.portfolio.positions),
+        }
 
     def initialize_session(
         self,
@@ -365,6 +551,11 @@ class DaemonController:
             self.high_water_mark = eq
         save_sentinel_state(self.db_path, "high_water_mark", self.high_water_mark, session_date=self.current_session_date)
 
+        # Restore emergency halt if persisted
+        if "emergency_halt" in state and float(state["emergency_halt"]["value"]) > 0:
+            self._is_emergency_halted = True
+            self._emergency_halt_reason = state["emergency_halt"].get("text_value") or "PERSISTED_EMERGENCY_HALT"
+
     def on_session_check(
         self,
         current_time: Optional[datetime] = None,
@@ -384,7 +575,16 @@ class DaemonController:
             self.current_session_date = session_date
             self.day_start_equity = eq
             self.sentinel.daily_starting_equity = eq
-            self.sentinel.is_killswitch_tripped = False
+            if self.session:
+                self.session.portfolio.reset_daily_metrics(eq)
+                self.paper_engine._persist_session(self.session)
+
+            # Emergency halts persist across daily rollover until explicit admin rearm!
+            if not self.is_halted and not self._is_emergency_halted:
+                self.sentinel.is_killswitch_tripped = False
+            else:
+                log_msg(f"[ROLLOVER] Emergency halt persists across rollover: {self.halt_reason}")
+
             save_sentinel_state(self.db_path, "day_start_equity", self.day_start_equity, session_date=self.current_session_date)
             # High-water mark is NOT reset
             self.high_water_mark = max(self.high_water_mark, eq)
@@ -401,6 +601,18 @@ class DaemonController:
 
         ist_now = get_ist_now(current_time)
         self.on_session_check(current_time=current_time)
+        phase = self.get_phase(ist_now)
+
+        # Check circuit breaker / emergency halt FIRST
+        if self.is_halted:
+            log_msg(f"[HALTED] Daemon trading is paused due to emergency halt: {self.halt_reason}")
+            return {
+                "status": "HALTED",
+                "phase": phase.value,
+                "reason": self.halt_reason,
+                "current_equity": self.session.portfolio.total_equity,
+                "open_positions": len(self.session.portfolio.positions),
+            }
 
         results = scan_results or {}
         if scan_results is None:
@@ -410,7 +622,10 @@ class DaemonController:
         market_prices = {}
         for sym, data in results.items():
             if data.get("status") == "OK" and "price" in data:
-                market_prices[sym] = data["price"]
+                price_val = data["price"]
+                market_prices[sym] = price_val
+                self.last_valid_quotes[sym] = price_val
+                self.last_valid_quotes[sym.upper()] = price_val
 
         # STEP 1: Mark-to-market EXISTING POSITIONS FIRST with validated fresh data
         if market_prices:
@@ -449,7 +664,39 @@ class DaemonController:
         # STEP 4: Check Sentinel daily drawdown killswitch
         self.sentinel.check_daily_drawdown_killswitch(current_equity)
 
-        # STEP 5: Manage active positions (protective exits: SL / TP)
+        # MANDATORY 15:15 IST SQUARE-OFF
+        is_market_day = self.sentinel.is_market_day(ist_now)
+        time_minutes = ist_now.hour * 60 + ist_now.minute
+        is_square_off_time = is_market_day and time_minutes >= (15 * 60 + 15)
+
+        if is_square_off_time:
+            log_msg(f"[EOD] Mandatory 15:15 IST square-off active (IST {ist_now.strftime('%H:%M')}).")
+            square_off_res = self.square_off_open_positions(market_prices=market_prices)
+            return {
+                "status": "SQUARE_OFF_COMPLETED" if not square_off_res["errors"] else "SQUARE_OFF_PARTIAL",
+                "phase": phase.value,
+                "current_equity": self.session.portfolio.total_equity,
+                "daily_loss_pct": risk_state["daily_loss_pct"],
+                "drawdown_pct": risk_state["drawdown_pct"],
+                "high_water_mark": self.high_water_mark,
+                "open_positions": len(self.session.portfolio.positions),
+                "squared_off": square_off_res["squared_off"],
+                "square_off_errors": square_off_res["errors"],
+            }
+
+        # If not regular trading phase (e.g. PREMARKET or MAINTENANCE), do not enter trades
+        if phase != DaemonPhase.REGULAR:
+            return {
+                "status": f"PHASE_{phase.value}",
+                "phase": phase.value,
+                "current_equity": current_equity,
+                "daily_loss_pct": risk_state["daily_loss_pct"],
+                "drawdown_pct": risk_state["drawdown_pct"],
+                "high_water_mark": self.high_water_mark,
+                "open_positions": len(self.session.portfolio.positions),
+            }
+
+        # STEP 5: Manage active positions (protective exits: SL / TP) during regular trading
         for sym, data in results.items():
             if data.get("status") != "OK":
                 continue
@@ -497,16 +744,7 @@ class DaemonController:
 
         # STEP 6: Check Strategy Allocation Manifest before admitting any BUY orders
         manifest = self.sentinel.get_latest_strategy_decision(current_ist_date=self.current_session_date)
-        is_manifest_valid = True
-        if not manifest or manifest.get("selected_strategy") == "WAIT":
-            is_manifest_valid = False
-        else:
-            rm = manifest.get("risk_multiplier")
-            if not isinstance(rm, (int, float)) or not math.isfinite(rm) or rm <= 0:
-                is_manifest_valid = False
-            m_date = manifest.get("session_date") or manifest.get("date")
-            if m_date and m_date != self.current_session_date:
-                is_manifest_valid = False
+        is_manifest_valid, _ = validate_manifest(manifest, self.current_session_date)
 
         # STEP 7: Process BUY signals
         for sym, data in results.items():
@@ -518,6 +756,8 @@ class DaemonController:
             if not is_manifest_valid:
                 continue
             if self.sentinel.is_killswitch_tripped:
+                continue
+            if self.is_halted:
                 continue
             if len(self.session.portfolio.positions) >= self.risk_limits.max_open_positions:
                 continue
@@ -558,6 +798,7 @@ class DaemonController:
 
         return {
             "status": "OK",
+            "phase": phase.value,
             "current_equity": current_equity,
             "daily_loss_pct": risk_state["daily_loss_pct"],
             "drawdown_pct": risk_state["drawdown_pct"],
@@ -619,10 +860,18 @@ def main():
         now_ist = get_ist_now()
         ist_hour = now_ist.hour
         ist_minute = now_ist.minute
+        phase = controller.get_phase(now_ist)
         is_market_day = controller.sentinel.is_market_day(now_ist)
-        is_market_open = is_market_day and (
-            (ist_hour == 9 and ist_minute >= 15) or (10 <= ist_hour < 15) or (ist_hour == 15 and ist_minute < 15)
-        )
+        is_market_open = is_market_day and (phase == DaemonPhase.REGULAR or phase == DaemonPhase.POST_MARKET_EOD)
+
+        if controller.is_halted:
+            if cycle % 10 == 1:
+                log_msg(f"[HALTED] Daemon trading paused due to emergency halt: {controller.halt_reason}")
+            for _ in range(SCAN_INTERVAL_SECONDS):
+                if not running:
+                    break
+                time.sleep(1)
+            continue
 
         # Scheduled pre-market maintenance
         if ist_hour == 8 and 30 <= ist_minute <= 35:

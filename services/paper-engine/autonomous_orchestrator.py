@@ -230,7 +230,7 @@ class AutonomousSentinel:
                 return safe_fallback
 
             # Validate session/date if current_ist_date is provided
-            manifest_date = data.get("session_date") or data.get("date")
+            manifest_date = data.get("target_session_date") or data.get("session_date") or data.get("date")
             if current_ist_date and manifest_date and manifest_date != current_ist_date:
                 logger.warning(f"Manifest {latest_file} date {manifest_date} does not match current session {current_ist_date}. Emitting WAIT.")
                 return safe_fallback
