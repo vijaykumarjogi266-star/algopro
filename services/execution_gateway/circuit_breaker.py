@@ -307,6 +307,18 @@ class CircuitBreakerEngine:
                 temp_name = tf.name
 
             os.replace(temp_name, self.state_file_path)
+
+            # Fsync directory descriptor to guarantee durability across power failure
+            if dir_name:
+                try:
+                    dir_fd = os.open(dir_name, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except Exception:
+                    pass
+
             self._persistence_error = None
         except Exception as e:
             self._persistence_error = str(e)
@@ -323,6 +335,16 @@ class CircuitBreakerEngine:
             return
         if os.path.exists(self.state_file_path):
             os.remove(self.state_file_path)
+            dir_name = os.path.dirname(self.state_file_path)
+            if dir_name:
+                try:
+                    dir_fd = os.open(dir_name, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except Exception:
+                    pass
 
     def _restore_disk_state(self) -> None:
         """Restore gateway state from persistent disk file on startup (Fail-Closed Startup)."""

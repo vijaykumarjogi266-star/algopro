@@ -24,6 +24,8 @@ from services.paper_engine.adapters.credentials import (
     ExecutionEnvironment,
     LIVE_TRADING_ENABLED,
 )
+from services.execution_gateway.circuit_breaker import CircuitBreakerEngine
+from services.execution_gateway.contracts import CircuitBreakerTripped
 from apps.api.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -77,6 +79,7 @@ class SimulatedBrokerAdapter(PaperExecutionProvider):
         self,
         connection_config: Optional[BrokerConnectionConfig] = None,
         lifecycle_manager: Optional[ExecutionLifecycleManager] = None,
+        circuit_breaker: Optional[CircuitBreakerEngine] = None,
     ):
         self.config = connection_config or BrokerConnectionConfig(
             broker_name="simulated_paper",
@@ -88,6 +91,7 @@ class SimulatedBrokerAdapter(PaperExecutionProvider):
             raise PermissionError("SimulatedBrokerAdapter cannot be instantiated in LIVE mode.")
 
         self.lifecycle_manager = lifecycle_manager or ExecutionLifecycleManager()
+        self.circuit_breaker = circuit_breaker
         self._orders: Dict[str, ExecutionOrder] = {}
         self._fills: Dict[str, ExecutionFill] = {}
 
@@ -112,6 +116,15 @@ class SimulatedBrokerAdapter(PaperExecutionProvider):
         """Executes the paper order through the lifecycle manager."""
         if self.config.environment == ExecutionEnvironment.LIVE:
             raise PermissionError("Live execution is forbidden.")
+
+        if self.circuit_breaker is not None and self.circuit_breaker.is_halted:
+            raise CircuitBreakerTripped(
+                f"Execution gateway halted by circuit breaker: {self.circuit_breaker.trip_reasons}"
+            )
+
+        # Transition proposed order through risk evaluation if not yet evaluated
+        if order.state == OrderLifecycleState.ORDER_PROPOSED:
+            order = self.lifecycle_manager.evaluate_risk(order, current_portfolio_value=1_000_000.0)
 
         # Ensure order is submitted
         if order.state == OrderLifecycleState.ORDER_ACCEPTED:
