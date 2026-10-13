@@ -55,6 +55,7 @@ test-security:
 		tests/unit/test_credential_failure_modes.py \
 		tests/integration/test_actual_ledger_reconciliation.py \
 		tests/integration/test_backup_failure_modes.py \
+		tests/integration/test_protective_cutoff_failure_modes.py \
 		-v
 
 test-browser:

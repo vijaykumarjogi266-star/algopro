@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+export ALGO_LAB_RELEASE_VERIFY_RUNNING=1
+
 echo "=========================================================="
 echo "      ALGO LAB: COMPREHENSIVE RELEASE VERIFICATION       "
 echo "=========================================================="
@@ -31,22 +33,34 @@ echo ">>> [3/11] Unit, contract, and integration test suites..."
 python3 -m pytest \
   tests/integration/test_python312_startup.py \
   tests/integration/test_security_configuration.py \
+  tests/integration/test_security_configuration_end_to_end.py \
   tests/integration/test_authorization_enforcement.py \
   tests/integration/test_execution_control_wiring.py \
   tests/unit/test_durable_breaker_recovery.py \
+  tests/unit/test_breaker_final_recovery.py \
   tests/unit/test_release_gate.py \
   tests/integration/test_credential_error_redaction.py \
   tests/browser/test_stored_xss.py \
   tests/unit/test_circuit_breaker_state_integrity.py \
   tests/unit/test_circuit_breaker_persistence_failures.py \
   tests/unit/test_credential_failure_modes.py \
+  tests/unit/test_dataset_contract_enforcement.py \
+  tests/unit/test_buy_and_hold_allocation.py \
+  tests/unit/test_fill_ledger_accounting.py \
   tests/unit/test_backtest_data_and_dispatch.py \
   tests/unit/test_backtest_causality.py \
   tests/unit/test_backtest_accounting_and_risk.py \
   tests/integration/test_daemon_risk_wiring.py \
   tests/integration/test_actual_ledger_reconciliation.py \
+  tests/integration/test_multiday_real_ledger.py \
   tests/integration/test_backup_failure_modes.py \
   tests/unit/test_research_integrity.py \
+  tests/integration/test_daemon_release_lifecycle.py \
+  tests/integration/test_real_fill_multiday_accounting.py \
+  tests/integration/test_protective_cutoff_failure_modes.py \
+  tests/unit/test_manifest_freshness_and_replay.py \
+  tests/unit/test_release_gate_behavior.py \
+  tests/deployment/test_image_canary_layers.py \
   -q --disable-warnings
 echo "[PASS] Safety-critical test suites passed."
 
@@ -163,7 +177,9 @@ echo "[PASS] Strict paper-only trading locks confirmed."
 echo "=========================================================="
 if [ "$BLOCKED_COUNT" -eq 0 ]; then
   echo "    VERIFIED: ALL AUTOMATED RELEASE CRITERIA PASSED      "
+  exit 0
 else
-  echo "    RELEASE CHECK COMPLETE: $BLOCKED_COUNT HOST-BLOCKED ENVIRONMENT CHECKS (RUN IN CI) "
+  echo "    RELEASE CHECK BLOCKED: $BLOCKED_COUNT MANDATORY CRITERIA FAILED/BLOCKED "
+  echo "=========================================================="
+  exit 1
 fi
-echo "=========================================================="
