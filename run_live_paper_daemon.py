@@ -13,29 +13,40 @@ import sys
 import os
 import sqlite3
 import time
-import signal
-from datetime import datetime, timezone, date
-from typing import Dict, Optional, Tuple
+import math
+from datetime import datetime, timezone, timedelta, date
+from typing import Dict, Optional, Tuple, Any
 import pandas as pd
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-running = True
+# Indian Standard Time (IST, UTC+5:30)
+IST_TZ = timezone(timedelta(hours=5, minutes=30))
 
-def handle_shutdown(signum, frame):
-    global running
-    print(f"\n[DAEMON] Received signal {signum}. Initiating graceful state persistence and shutdown...", flush=True)
-    running = False
 
-signal.signal(signal.SIGINT, handle_shutdown)
-signal.signal(signal.SIGTERM, handle_shutdown)
+def get_ist_now(now_dt: Optional[datetime] = None) -> datetime:
+    """Return datetime in Indian Standard Time (IST)."""
+    if now_dt is None:
+        now_dt = datetime.now(timezone.utc)
+    elif now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    return now_dt.astimezone(IST_TZ)
 
-try:
-    import yfinance as yf
-except ImportError:
-    print("Error: yfinance is required.")
-    sys.exit(1)
+
+def get_ist_session_date(now_dt: Optional[datetime] = None) -> str:
+    """Return the current IST exchange trading session date formatted as YYYY-MM-DD."""
+    return get_ist_now(now_dt).strftime("%Y-%m-%d")
+
+
+# Lazy yfinance import helper to prevent import-time failure
+def _get_yf():
+    try:
+        import yfinance as yf
+        return yf
+    except ImportError:
+        return None
+
 
 from data.schemas.contracts import Exchange, TimeFrame
 from services.risk_engine.engine import RiskEngine
@@ -91,49 +102,62 @@ def compute_risk_state(
 # Sentinel-state SQLite persistence (survives process restarts)
 # ---------------------------------------------------------------------------
 
-def _load_sentinel_state(db_path: str) -> Dict[str, object]:
-    """Load persisted sentinel state from SQLite. Returns defaults if not found."""
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sentinel_state (
-                key TEXT PRIMARY KEY,
-                value REAL NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-        cursor = conn.execute("SELECT key, value, updated_at FROM sentinel_state")
-        rows = {r[0]: {"value": r[1], "date": r[2][:10]} for r in cursor.fetchall()}
-        conn.close()
-        return rows
-    except Exception as exc:
-        print(f"[DAEMON] Warning: Could not load sentinel state: {exc}", flush=True)
-        return {}
-
-
-def _save_sentinel_state(db_path: str, key: str, value: float) -> None:
-    """Persist a sentinel state value to SQLite."""
-    try:
-        conn = sqlite3.connect(db_path)
-        now_iso = datetime.now(timezone.utc).isoformat()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sentinel_state (
-                key TEXT PRIMARY KEY,
-                value REAL NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        conn.execute(
-            "INSERT INTO sentinel_state(key, value, updated_at) VALUES(?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            (key, value, now_iso),
+def load_sentinel_state(db_path: str) -> Dict[str, dict]:
+    """Load persisted sentinel state from SQLite."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sentinel_state (
+            key TEXT PRIMARY KEY,
+            value REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            session_date TEXT
         )
-        conn.commit()
-        conn.close()
-    except Exception as exc:
-        print(f"[DAEMON] Warning: Could not persist sentinel state: {exc}", flush=True)
+    """)
+    cursor = conn.execute("PRAGMA table_info(sentinel_state)")
+    cols = [r[1] for r in cursor.fetchall()]
+    if "session_date" not in cols:
+        conn.execute("ALTER TABLE sentinel_state ADD COLUMN session_date TEXT")
+    conn.commit()
 
+    cursor = conn.execute("SELECT key, value, updated_at, session_date FROM sentinel_state")
+    rows = {}
+    for r in cursor.fetchall():
+        s_date = r[3] if r[3] else (r[2][:10] if r[2] else "")
+        rows[r[0]] = {"value": r[1], "date": r[2][:10] if r[2] else "", "session_date": s_date}
+    conn.close()
+    return rows
+
+_load_sentinel_state = load_sentinel_state
+
+
+def save_sentinel_state(db_path: str, key: str, value: float, session_date: Optional[str] = None) -> None:
+    """Persist a sentinel state value to SQLite. Raises on database failure."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if session_date is None:
+        session_date = get_ist_session_date()
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sentinel_state (
+            key TEXT PRIMARY KEY,
+            value REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            session_date TEXT
+        )
+    """)
+    cursor = conn.execute("PRAGMA table_info(sentinel_state)")
+    cols = [r[1] for r in cursor.fetchall()]
+    if "session_date" not in cols:
+        conn.execute("ALTER TABLE sentinel_state ADD COLUMN session_date TEXT")
+
+    conn.execute(
+        "INSERT INTO sentinel_state(key, value, updated_at, session_date) VALUES(?,?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, session_date=excluded.session_date",
+        (key, value, now_iso, session_date),
+    )
+    conn.commit()
+    conn.close()
+
+_save_sentinel_state = save_sentinel_state
 
 
 # Configuration Parameters
@@ -160,11 +184,18 @@ def log_msg(msg: str):
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     line = f"[{timestamp}] {msg}"
     print(line, flush=True)
-    with open(LOG_PATH, "a") as f:
-        f.write(line + "\n")
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def scan_symbol(symbol: str) -> dict:
+    yf = _get_yf()
+    if yf is None:
+        return {"symbol": symbol, "status": "ERROR", "error": "yfinance not installed"}
     try:
         df = yf.download(symbol, period="5d", interval="1h", progress=False)
         if hasattr(df.columns, "levels") and len(df.columns.levels) > 1:
@@ -181,6 +212,11 @@ def scan_symbol(symbol: str) -> dict:
         latest_close = float(closes[-1])
         latest_high = float(highs[-1])
         latest_low = float(lows[-1])
+        bar_ts = df.index[-1]
+        if hasattr(bar_ts, "to_pydatetime"):
+            bar_ts = bar_ts.to_pydatetime()
+        if bar_ts.tzinfo is None:
+            bar_ts = bar_ts.replace(tzinfo=IST_TZ)
 
         sma9 = float(pd.Series(closes).rolling(9).mean().iloc[-1])
         sma21 = float(pd.Series(closes).rolling(min(21, len(closes))).mean().iloc[-1])
@@ -225,18 +261,329 @@ def scan_symbol(symbol: str) -> dict:
             "price": latest_close,
             "high": latest_high,
             "low": latest_low,
+            "bar_timestamp": bar_ts,
             "rsi": latest_rsi,
             "atr": atr14,
             "signal": signal,
             "stop_loss": stop_loss,
             "target": target_price,
-            "historical_returns": list(pd.Series(closes).pct_change().dropna().iloc[-25:])
+            "historical_returns": list(pd.Series(closes).pct_change().dropna().iloc[-25:]),
         }
     except Exception as e:
         return {"symbol": symbol, "status": "ERROR", "error": str(e)}
 
 
+# ---------------------------------------------------------------------------
+# Daemon Controller (encapsulates cycle state and execution)
+# ---------------------------------------------------------------------------
+
+class DaemonController:
+    """Manages paper-trading daemon sessions, risk wiring, and cycle execution."""
+
+    def __init__(
+        self,
+        db_path: str,
+        initial_capital: float = INITIAL_CAPITAL,
+        leverage: float = LEVERAGE,
+        universe: Optional[list] = None,
+        risk_limits: Optional[HardRiskLimits] = None,
+        sentinel: Optional[AutonomousSentinel] = None,
+    ):
+        self.db_path = db_path
+        self.initial_capital = initial_capital
+        self.leverage = leverage
+        self.buying_power = initial_capital * leverage
+        self.universe = universe or UNIVERSE
+
+        self.risk_limits = risk_limits or HardRiskLimits(
+            max_daily_loss_pct=0.04,
+            max_portfolio_drawdown_pct=0.10,
+            max_capital_per_trade_pct=0.20,
+            max_open_positions=4,
+            enforce_mandatory_stop_loss=True,
+        )
+        self.var_filter = ValueAtRiskFilter(confidence_level=0.95, max_var_pct=0.035)
+        self.risk_engine = RiskEngine(limits=self.risk_limits, hooks=[self.var_filter])
+        self.risk_auditor = ContinuousRiskAuditor(limits=self.risk_limits)
+
+        self.lifecycle_manager = ExecutionLifecycleManager(risk_engine=self.risk_engine)
+        self.paper_engine = PaperTradingEngine(self.db_path, lifecycle_manager=self.lifecycle_manager)
+
+        self.sentinel = sentinel or AutonomousSentinel(
+            db_path=self.db_path,
+            max_daily_drawdown_pct=0.025,
+            initial_capital=self.buying_power,
+        )
+
+        self.session = None
+        self.day_start_equity = self.buying_power
+        self.high_water_mark = self.buying_power
+        self.current_session_date = None
+        self.trade_stops = {}
+        self.trade_targets = {}
+        self.trade_entry_times = {}
+
+    def initialize_session(
+        self,
+        current_time: Optional[datetime] = None,
+        current_equity: Optional[float] = None,
+    ) -> None:
+        """Initialize or resume trading session, restoring authoritative baselines."""
+        ist_now = get_ist_now(current_time)
+        self.current_session_date = ist_now.strftime("%Y-%m-%d")
+
+        sessions = self.paper_engine.list_sessions()
+        for s in sessions:
+            if s.status == SessionStatus.RUNNING:
+                self.session = self.paper_engine.get_session(s.session_id)
+                break
+
+        if not self.session:
+            self.session = self.paper_engine.create_session(
+                name="Persistent Live Paper Session",
+                strategy_id="strat_daemon_5x",
+                universe=self.universe,
+                initial_capital=self.buying_power,
+            )
+            self.paper_engine.start_session(self.session.session_id)
+
+        eq = current_equity if current_equity is not None else self.session.portfolio.total_equity
+
+        # Load persisted sentinel state
+        state = load_sentinel_state(self.db_path)
+        if "day_start_equity" in state and state["day_start_equity"].get("session_date") == self.current_session_date:
+            self.day_start_equity = float(state["day_start_equity"]["value"])
+        else:
+            self.day_start_equity = eq
+            save_sentinel_state(self.db_path, "day_start_equity", self.day_start_equity, session_date=self.current_session_date)
+
+        self.sentinel.daily_starting_equity = self.day_start_equity
+
+        if "high_water_mark" in state:
+            self.high_water_mark = max(float(state["high_water_mark"]["value"]), eq)
+        else:
+            self.high_water_mark = eq
+        save_sentinel_state(self.db_path, "high_water_mark", self.high_water_mark, session_date=self.current_session_date)
+
+    def on_session_check(
+        self,
+        current_time: Optional[datetime] = None,
+        current_equity: Optional[float] = None,
+    ) -> None:
+        """Check for IST session rollover and reset daily baseline once."""
+        ist_now = get_ist_now(current_time)
+        session_date = ist_now.strftime("%Y-%m-%d")
+        eq = (
+            current_equity
+            if current_equity is not None
+            else (self.session.portfolio.total_equity if self.session else self.buying_power)
+        )
+
+        if self.current_session_date != session_date:
+            # Session rollover
+            self.current_session_date = session_date
+            self.day_start_equity = eq
+            self.sentinel.daily_starting_equity = eq
+            self.sentinel.is_killswitch_tripped = False
+            save_sentinel_state(self.db_path, "day_start_equity", self.day_start_equity, session_date=self.current_session_date)
+            # High-water mark is NOT reset
+            self.high_water_mark = max(self.high_water_mark, eq)
+            save_sentinel_state(self.db_path, "high_water_mark", self.high_water_mark, session_date=self.current_session_date)
+
+    def run_cycle(
+        self,
+        scan_results: Optional[Dict[str, dict]] = None,
+        current_time: Optional[datetime] = None,
+    ) -> dict:
+        """Execute a single scan-risk-trade cycle deterministically."""
+        if self.session is None:
+            self.initialize_session(current_time=current_time)
+
+        ist_now = get_ist_now(current_time)
+        self.on_session_check(current_time=current_time)
+
+        results = scan_results or {}
+        if scan_results is None:
+            for sym in self.universe:
+                results[sym] = scan_symbol(sym)
+
+        market_prices = {}
+        for sym, data in results.items():
+            if data.get("status") == "OK" and "price" in data:
+                market_prices[sym] = data["price"]
+
+        # STEP 1: Mark-to-market EXISTING POSITIONS FIRST with validated fresh data
+        if market_prices:
+            self.session.portfolio.mark_to_market(market_prices)
+
+        current_equity = self.session.portfolio.total_equity
+
+        # STEP 2: Compute authoritative risk state
+        risk_state = compute_risk_state(
+            day_start_equity=self.day_start_equity,
+            high_water_mark=self.high_water_mark,
+            current_equity=current_equity,
+        )
+        self.high_water_mark = risk_state["new_high_water_mark"]
+
+        # STEP 3: Persist HWM on EVERY valid cycle, including WAIT-only cycles!
+        try:
+            save_sentinel_state(
+                self.db_path,
+                "high_water_mark",
+                self.high_water_mark,
+                session_date=self.current_session_date,
+            )
+        except Exception as exc:
+            # Fail closed on state storage failure
+            self.sentinel.is_killswitch_tripped = True
+            log_msg(f"[ERROR] State storage failure: {exc}. Trips killswitch.")
+            return {
+                "status": "STORAGE_FAILURE",
+                "storage_error": str(exc),
+                "current_equity": current_equity,
+                "daily_loss_pct": risk_state["daily_loss_pct"],
+                "drawdown_pct": risk_state["drawdown_pct"],
+            }
+
+        # STEP 4: Check Sentinel daily drawdown killswitch
+        self.sentinel.check_daily_drawdown_killswitch(current_equity)
+
+        # STEP 5: Manage active positions (protective exits: SL / TP)
+        for sym, data in results.items():
+            if data.get("status") != "OK":
+                continue
+            sym_key = sym.upper()
+            pos = self.session.portfolio.positions.get(sym_key)
+            if pos and pos.quantity > 0:
+                current_sl = self.trade_stops.get(sym_key, pos.average_entry_price * 0.98)
+                current_tp = self.trade_targets.get(sym_key, pos.average_entry_price * 1.03)
+
+                bar_ts = data.get("bar_timestamp")
+                entry_ts = self.trade_entry_times.get(sym_key)
+
+                # Pre-entry hourly extreme cannot trigger exit if bar started before or at entry
+                if bar_ts and entry_ts and bar_ts <= entry_ts:
+                    low_eval = data["price"]
+                    high_eval = data["price"]
+                else:
+                    low_eval = data.get("low", data["price"])
+                    high_eval = data.get("high", data["price"])
+
+                if low_eval <= current_sl:
+                    order, fill = self.paper_engine.submit_manual_order(
+                        session_id=self.session.session_id,
+                        symbol=sym,
+                        side=OrderSide.SELL,
+                        quantity=pos.quantity,
+                        price=current_sl,
+                    )
+                    self.session = self.paper_engine.get_session(self.session.session_id)
+                    self.trade_stops.pop(sym_key, None)
+                    self.trade_targets.pop(sym_key, None)
+                    self.trade_entry_times.pop(sym_key, None)
+                elif high_eval >= current_tp:
+                    order, fill = self.paper_engine.submit_manual_order(
+                        session_id=self.session.session_id,
+                        symbol=sym,
+                        side=OrderSide.SELL,
+                        quantity=pos.quantity,
+                        price=current_tp,
+                    )
+                    self.session = self.paper_engine.get_session(self.session.session_id)
+                    self.trade_stops.pop(sym_key, None)
+                    self.trade_targets.pop(sym_key, None)
+                    self.trade_entry_times.pop(sym_key, None)
+
+        # STEP 6: Check Strategy Allocation Manifest before admitting any BUY orders
+        manifest = self.sentinel.get_latest_strategy_decision(current_ist_date=self.current_session_date)
+        is_manifest_valid = True
+        if not manifest or manifest.get("selected_strategy") == "WAIT":
+            is_manifest_valid = False
+        else:
+            rm = manifest.get("risk_multiplier")
+            if not isinstance(rm, (int, float)) or not math.isfinite(rm) or rm <= 0:
+                is_manifest_valid = False
+            m_date = manifest.get("session_date") or manifest.get("date")
+            if m_date and m_date != self.current_session_date:
+                is_manifest_valid = False
+
+        # STEP 7: Process BUY signals
+        for sym, data in results.items():
+            if data.get("status") != "OK" or data.get("signal") != "BUY":
+                continue
+            sym_key = sym.upper()
+            price = data["price"]
+
+            if not is_manifest_valid:
+                continue
+            if self.sentinel.is_killswitch_tripped:
+                continue
+            if len(self.session.portfolio.positions) >= self.risk_limits.max_open_positions:
+                continue
+
+            risk_mult = manifest.get("risk_multiplier", 1.0)
+            risk_per_trade = self.initial_capital * 0.05 * risk_mult
+            stop_dist = max(price - data.get("stop_loss", price * 0.98), data.get("atr", price * 0.01))
+            shares = int(risk_per_trade / stop_dist) if stop_dist > 0 else 1
+            max_shares = int((min(current_equity, self.buying_power) * 0.19) / price)
+            shares = max(1, min(shares, max_shares))
+
+            eval_res = self.risk_engine.evaluate(
+                symbol=sym,
+                price=price,
+                proposed_quantity=shares,
+                stop_loss=data.get("stop_loss"),
+                current_portfolio_value=current_equity,
+                current_daily_loss_pct=risk_state["daily_loss_pct"],
+                current_drawdown_pct=risk_state["drawdown_pct"],
+                current_open_positions_count=len(self.session.portfolio.positions),
+                context={"historical_returns": data.get("historical_returns", [0.01] * 25)},
+            )
+
+            if eval_res.is_approved:
+                order, fill = self.paper_engine.submit_manual_order(
+                    session_id=self.session.session_id,
+                    symbol=sym,
+                    side=OrderSide.BUY,
+                    quantity=eval_res.approved_quantity,
+                    price=price,
+                    stop_loss=data.get("stop_loss"),
+                )
+                self.session = self.paper_engine.get_session(self.session.session_id)
+                if fill:
+                    self.trade_stops[sym_key] = data.get("stop_loss")
+                    self.trade_targets[sym_key] = data.get("target")
+                    self.trade_entry_times[sym_key] = ist_now
+
+        return {
+            "status": "OK",
+            "current_equity": current_equity,
+            "daily_loss_pct": risk_state["daily_loss_pct"],
+            "drawdown_pct": risk_state["drawdown_pct"],
+            "high_water_mark": self.high_water_mark,
+            "open_positions": len(self.session.portfolio.positions),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Daemon Entry Point
+# ---------------------------------------------------------------------------
+
+running = True
+
+
+def handle_shutdown(signum, frame):
+    global running
+    print(f"\n[DAEMON] Received signal {signum}. Initiating graceful shutdown...", flush=True)
+    running = False
+
+
 def main():
+    import signal
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
@@ -247,305 +594,91 @@ def main():
     log_msg(f"Scan Interval: {SCAN_INTERVAL_SECONDS} seconds")
     log_msg("=" * 65)
 
-    risk_limits = HardRiskLimits(
-        max_daily_loss_pct=0.04,
-        max_portfolio_drawdown_pct=0.10,
-        max_capital_per_trade_pct=0.20,
-        max_open_positions=4,
-        enforce_mandatory_stop_loss=True,
-    )
-    var_filter = ValueAtRiskFilter(confidence_level=0.95, max_var_pct=0.035)
-    risk_engine = RiskEngine(limits=risk_limits, hooks=[var_filter])
-    risk_auditor = ContinuousRiskAuditor(limits=risk_limits)
+    controller = DaemonController(db_path=DB_PATH, initial_capital=INITIAL_CAPITAL, leverage=LEVERAGE)
+    controller.initialize_session()
 
-    lifecycle_manager = ExecutionLifecycleManager(risk_engine=risk_engine)
-    paper_engine = PaperTradingEngine(DB_PATH, lifecycle_manager=lifecycle_manager)
-
-    # Resume existing session or create fresh
-    sessions = paper_engine.list_sessions()
-    session = None
-    for s in sessions:
-        if s.status == SessionStatus.RUNNING:
-            session = paper_engine.get_session(s.session_id)
-            break
-
-    if not session:
-        session = paper_engine.create_session(
-            name="Persistent Live Paper Session",
-            strategy_id="strat_daemon_5x",
-            universe=UNIVERSE,
-            initial_capital=BUYING_POWER,
-        )
-        paper_engine.start_session(session.session_id)
-        log_msg(f"Created fresh paper session ID: {session.session_id}")
-    else:
-        log_msg(f"Resumed active paper session ID: {session.session_id}")
-
-    sentinel = AutonomousSentinel(
-        db_path=DB_PATH,
-        max_daily_drawdown_pct=0.025,
-        initial_capital=BUYING_POWER,
-    )
-
-    # Load authoritative risk state from SQLite (survives process restarts)
-    _state = _load_sentinel_state(DB_PATH)
-    today_str = date.today().isoformat()
-    current_equity = session.portfolio.total_equity
-
-    # Restore day_start_equity if from today; otherwise reset to current equity
-    if "day_start_equity" in _state and _state["day_start_equity"]["date"] == today_str:
-        day_start_equity: float = float(_state["day_start_equity"]["value"])
-        log_msg(f"[RISK STATE] Restored day_start_equity from DB: INR {day_start_equity:,.2f}")
-    else:
-        day_start_equity = current_equity
-        _save_sentinel_state(DB_PATH, "day_start_equity", day_start_equity)
-        log_msg(f"[RISK STATE] New session day_start_equity: INR {day_start_equity:,.2f}")
-
-    # Restore high-water mark (never reset across restarts; only forward-progresses)
-    if "high_water_mark" in _state:
-        high_water_mark: float = max(float(_state["high_water_mark"]["value"]), current_equity)
-        log_msg(f"[RISK STATE] Restored high_water_mark from DB: INR {high_water_mark:,.2f}")
-    else:
-        high_water_mark = current_equity
-    _save_sentinel_state(DB_PATH, "high_water_mark", high_water_mark)
-
-    cycle = 0
-    trade_targets = {}  # {symbol: target_price}
-    trade_stops = {}    # {symbol: stop_loss}
-    market_prices = {}
     net_guard = NetworkConnectivityGuard()
+    cycle = 0
 
     while running:
         cycle += 1
 
-        # Network Connectivity Guard & WAN Health Probe
         is_online, net_changed, outage_dur = net_guard.probe()
         if net_changed and not is_online:
-            log_msg("[NETWORK ALERT] WAN connection lost. Freezing trade proposal and entering defensive standby.")
+            log_msg("[NETWORK ALERT] WAN connection lost. Freezing trade proposals.")
         elif net_changed and is_online:
-            log_msg(f"[NETWORK RECOVERED] WAN connectivity restored after {outage_dur:.1f}s. Reconnecting...")
-            sentinel.dispatcher.notify(
-                title="Network Restored",
-                message=f"Algo Lab restored connectivity after {outage_dur:.1f}s outage.",
-                level="INFO",
-                fields={"Outage Duration": f"{outage_dur:.1f}s", "Equity": f"INR {session.portfolio.total_equity:,.2f}"}
-            )
+            log_msg(f"[NETWORK RECOVERED] WAN connectivity restored after {outage_dur:.1f}s.")
 
         if not is_online:
-            if cycle % 5 == 1:
-                log_msg(f"[OFFLINE DEFENSE] Internet unavailable. In-flight trades frozen. Retrying in {SCAN_INTERVAL_SECONDS}s...")
             for _ in range(SCAN_INTERVAL_SECONDS):
                 if not running:
                     break
                 time.sleep(1)
             continue
 
-        now_utc = datetime.now(timezone.utc)
-        ist_minutes_total = (now_utc.hour * 60 + now_utc.minute) + 330  # UTC to IST (+5:30)
-        ist_hour = (ist_minutes_total // 60) % 24
-        ist_minute = ist_minutes_total % 60
-        is_past_1515_ist = (ist_hour > 15) or (ist_hour == 15 and ist_minute >= 15)
-        is_market_day = sentinel.is_market_day()
+        now_ist = get_ist_now()
+        ist_hour = now_ist.hour
+        ist_minute = now_ist.minute
+        is_market_day = controller.sentinel.is_market_day(now_ist)
         is_market_open = is_market_day and (
             (ist_hour == 9 and ist_minute >= 15) or (10 <= ist_hour < 15) or (ist_hour == 15 and ist_minute < 15)
         )
 
-        # Autonomous Sentinel Daily Drawdown Killswitch
-        if sentinel.check_daily_drawdown_killswitch(session.portfolio.total_equity):
-            log_msg("[CIRCUIT BREAKER ACTIVE] Daily drawdown limit (-2.5%) breached. All new entries frozen.")
-
-        # --- 1. Scheduled Chronological Automation ---
-        # 08:30 IST Pre-Market System Readiness & Strategy Allocation Ingestion
+        # Scheduled pre-market maintenance
         if ist_hour == 8 and 30 <= ist_minute <= 35:
-            if not getattr(sentinel, "_premarket_executed_today", False):
-                sentinel.execute_pre_market_maintenance()
-                sentinel._premarket_executed_today = True
+            if not getattr(controller.sentinel, "_premarket_executed_today", False):
+                controller.sentinel.execute_pre_market_maintenance()
+                controller.sentinel._premarket_executed_today = True
         elif ist_hour != 8:
-            sentinel._premarket_executed_today = False
+            controller.sentinel._premarket_executed_today = False
 
-        # 15:35 IST Post-Market EOD Double-Entry Audit & Tearsheet
+        # Scheduled post-market EOD audit
         if ist_hour == 15 and 35 <= ist_minute < 40:
-            if not getattr(sentinel, "_eod_dispatched_today", False):
-                sentinel.execute_eod_reconciliation_and_tearsheet(
-                    session.portfolio.total_equity,
-                    len(session.portfolio.positions),
+            if not getattr(controller.sentinel, "_eod_dispatched_today", False):
+                pos_dict = {
+                    sym: {
+                        "quantity": pos.quantity,
+                        "avg_price": pos.average_entry_price,
+                        "current_price": pos.current_price,
+                        "cost_basis": pos.cost_basis,
+                    }
+                    for sym, pos in controller.session.portfolio.positions.items()
+                }
+                controller.sentinel.execute_eod_reconciliation_and_tearsheet(
+                    portfolio_equity=controller.session.portfolio.total_equity,
+                    open_positions_count=len(controller.session.portfolio.positions),
+                    cash=controller.session.portfolio.cash,
+                    realized_pnl=controller.session.portfolio.total_realized_pnl,
+                    total_fees=controller.session.portfolio.total_fees_paid,
+                    total_slippage=controller.session.portfolio.total_slippage_paid,
+                    positions=pos_dict,
                 )
-                sentinel._eod_dispatched_today = True
+                controller.sentinel._eod_dispatched_today = True
         elif ist_hour != 15:
-            sentinel._eod_dispatched_today = False
+            controller.sentinel._eod_dispatched_today = False
 
-        # 15:40 IST Autonomous Quantitative Research & Strategy Allocation Bot
-        if ist_hour == 15 and 40 <= ist_minute <= 50:
-            if not getattr(sentinel, "_research_executed_today", False):
-                log_msg("[AUTONOMOUS RESEARCH] Triggering EOD backtesting & strategy allocation bot...")
-                manifest = sentinel.execute_eod_research_and_strategy_allocation()
-                selected = manifest.get("selected_strategy", "WAIT")
-                log_msg(f"[AUTONOMOUS RESEARCH] Completed. Strategy allocated for next session: {selected}")
-                sentinel._research_executed_today = True
-        elif ist_hour != 15:
-            sentinel._research_executed_today = False
-
-        # 16:00 IST SQLite WAL Maintenance & VACUUM
-        if ist_hour == 16 and 0 <= ist_minute <= 5:
-            if not getattr(sentinel, "_vacuum_executed_today", False):
-                sentinel.vacuum_database()
-                sentinel._vacuum_executed_today = True
-        elif ist_hour != 16:
-            sentinel._vacuum_executed_today = False
-
-        # --- 2. Microstructure Cutoff: Square off any active positions past 15:15 IST ---
-        if is_past_1515_ist and len(session.portfolio.positions) > 0:
-            for sym_key, pos in list(session.portfolio.positions.items()):
-                log_msg(f"[15:15 IST AUTO-SQUARE-OFF] Mandatory intraday square-off for {sym_key} @ {pos.current_price:.2f}")
-                order, fill = paper_engine.submit_manual_order(
-                    session_id=session.session_id,
-                    symbol=sym_key,
-                    side=OrderSide.SELL,
-                    quantity=pos.quantity,
-                    price=pos.current_price,
-                )
-                session = paper_engine.get_session(session.session_id)
-                trade_stops.pop(sym_key, None)
-                trade_targets.pop(sym_key, None)
-
-        # --- 3. Standby Mode Outside Market Hours ---
+        # Standby mode outside market hours
         if not is_market_open:
             if cycle % 10 == 1:
                 status_str = "NSE market closed" if is_market_day else "Weekend / NSE holiday"
-                log_msg(f"[STANDBY] {status_str} (IST {ist_hour:02d}:{ist_minute:02d}). Next session opens 09:15 IST. Cash: INR {session.portfolio.cash:,.2f} | Equity: INR {session.portfolio.total_equity:,.2f}")
+                log_msg(f"[STANDBY] {status_str} (IST {ist_hour:02d}:{ist_minute:02d}).")
             for _ in range(SCAN_INTERVAL_SECONDS):
                 if not running:
                     break
                 time.sleep(1)
             continue
 
-        # --- 4. Active Market Trading Session (09:15 - 15:15 IST) ---
+        # Execute cycle
         log_msg(f"--- Cycle #{cycle}: Active Market Scan (IST {ist_hour:02d}:{ist_minute:02d}) ---")
-        market_prices = {}
-        for sym in UNIVERSE:
-            data = scan_symbol(sym)
-            if data["status"] != "OK":
-                continue
-
-            price = data["price"]
-            market_prices[sym] = price
-            sym_key = sym.upper()
-
-            # Manage active positions (SL / TP)
-            current_pos = session.portfolio.positions.get(sym_key)
-            if current_pos and current_pos.quantity > 0:
-                current_sl = trade_stops.get(sym_key, current_pos.average_entry_price * 0.98)
-                current_tp = trade_targets.get(sym_key, current_pos.average_entry_price * 1.03)
-
-                if data["low"] <= current_sl:
-                    log_msg(f"[EXIT TRIGGER] {sym} hit STOP LOSS @ {current_sl:.2f} (Entry: {current_pos.average_entry_price:.2f})")
-                    order, fill = paper_engine.submit_manual_order(
-                        session_id=session.session_id,
-                        symbol=sym,
-                        side=OrderSide.SELL,
-                        quantity=current_pos.quantity,
-                        price=current_sl,
-                    )
-                    session = paper_engine.get_session(session.session_id)
-                    trade_stops.pop(sym_key, None)
-                    trade_targets.pop(sym_key, None)
-                elif data["high"] >= current_tp:
-                    log_msg(f"[EXIT TRIGGER] {sym} hit TARGET PROFIT @ {current_tp:.2f} (Entry: {current_pos.average_entry_price:.2f})")
-                    order, fill = paper_engine.submit_manual_order(
-                        session_id=session.session_id,
-                        symbol=sym,
-                        side=OrderSide.SELL,
-                        quantity=current_pos.quantity,
-                        price=current_tp,
-                    )
-                    session = paper_engine.get_session(session.session_id)
-                    trade_stops.pop(sym_key, None)
-                    trade_targets.pop(sym_key, None)
-                continue
-
-            # Check new entry signals
-            if data["signal"] == "BUY":
-                if sentinel.is_killswitch_tripped:
-                    log_msg(f"[SIGNAL BLOCKED] {sym}: Daily drawdown killswitch is active. Entries frozen.")
-                    continue
-
-                if is_past_1515_ist:
-                    log_msg(f"[SIGNAL BLOCKED] {sym}: Past 15:15 IST intraday cutoff. Entries prohibited.")
-                    continue
-
-                if len(session.portfolio.positions) >= risk_limits.max_open_positions:
-                    log_msg(f"[SIGNAL IGNORED] {sym}: Max open positions ({risk_limits.max_open_positions}) reached.")
-                    continue
-
-                risk_per_trade = INITIAL_CAPITAL * 0.05
-                stop_dist = max(price - data["stop_loss"], data["atr"])
-                shares = int(risk_per_trade / stop_dist)
-                max_shares = int((BUYING_POWER * 0.20) / price)
-                shares = max(1, min(shares, max_shares))
-
-                # Compute authoritative risk state before every risk-gate evaluation
-                risk_state = compute_risk_state(
-                    day_start_equity=day_start_equity,
-                    high_water_mark=high_water_mark,
-                    current_equity=session.portfolio.total_equity,
-                )
-                high_water_mark = risk_state["new_high_water_mark"]
-                _save_sentinel_state(DB_PATH, "high_water_mark", high_water_mark)
-
-                eval_res = risk_engine.evaluate(
-                    symbol=sym,
-                    price=price,
-                    proposed_quantity=shares,
-                    stop_loss=data["stop_loss"],
-                    current_portfolio_value=session.portfolio.total_equity,
-                    current_daily_loss_pct=risk_state["daily_loss_pct"],  # authoritative
-                    current_drawdown_pct=risk_state["drawdown_pct"],       # authoritative
-                    current_open_positions_count=len(session.portfolio.positions),
-                    context={"historical_returns": data["historical_returns"]}
-                )
-
-                if eval_res.is_approved:
-                    order, fill = paper_engine.submit_manual_order(
-                        session_id=session.session_id,
-                        symbol=sym,
-                        side=OrderSide.BUY,
-                        quantity=eval_res.approved_quantity,
-                        price=price,
-                        stop_loss=data["stop_loss"],
-                    )
-                    session = paper_engine.get_session(session.session_id)
-                    if fill:
-                        trade_stops[sym_key] = data["stop_loss"]
-                        trade_targets[sym_key] = data["target"]
-                        log_msg(f"[BUY EXECUTED] {shares} shs {sym} @ {fill.fill_price:.2f} | SL: {data['stop_loss']} | Target: {data['target']}")
-                        sentinel.dispatcher.notify(
-                            title="Paper Order Executed",
-                            message=f"BUY {shares} shs of {sym} @ {fill.fill_price:.2f}",
-                            level="INFO",
-                            fields={"Symbol": sym, "Qty": str(shares), "Price": f"INR {fill.fill_price:.2f}", "SL": str(data["stop_loss"]), "TP": str(data["target"])}
-                        )
-                else:
-                    log_msg(f"[RISK REJECTED] {sym}: {eval_res.rejection_reason}")
-
-        # Mark-to-market portfolio valuation
-        session.portfolio.mark_to_market(market_prices)
-
-        pos_val = session.portfolio.market_value_of_positions
-        margin_used = pos_val / LEVERAGE
-        free_margin = max(0.0, INITIAL_CAPITAL - margin_used)
-
-        log_msg(f"Portfolio Status: Equity=INR {session.portfolio.total_equity:,.2f} | Margin Used=INR {margin_used:,.2f} ({(margin_used/INITIAL_CAPITAL)*100:.1f}%) | Free Margin=INR {free_margin:,.2f} | Unrealized PnL=INR {session.portfolio.total_unrealized_pnl:+,.2f} | Open Positions={len(session.portfolio.positions)}")
+        summary = controller.run_cycle(current_time=now_ist)
+        log_msg(f"Portfolio Status: Equity=INR {summary.get('current_equity', 0):,.2f} | Open Positions={summary.get('open_positions', 0)}")
 
         for _ in range(SCAN_INTERVAL_SECONDS):
             if not running:
                 break
             time.sleep(1)
 
-    log_msg(f"[SHUTDOWN] Paper trading daemon exiting gracefully. Final Equity: INR {session.portfolio.total_equity:,.2f}")
-    if market_prices:
-        session.portfolio.mark_to_market(market_prices)
-    paper_engine._persist_session(session)
-    log_msg("[SHUTDOWN] Portfolio state successfully persisted to database.")
+    log_msg("[SHUTDOWN] Paper trading daemon exiting gracefully.")
 
 
 if __name__ == "__main__":

@@ -371,6 +371,11 @@ class PaperTradingEngine:
             cursor = conn.execute("SELECT * FROM paper_sessions ORDER BY created_at DESC")
             return [self._row_to_session(r) for r in cursor.fetchall()]
 
+    def list_orders(self, session_id: str) -> List[ExecutionOrder]:
+        """Return all execution orders for the given session."""
+        session = self.get_session(session_id)
+        return list(session.orders) if session else []
+
     def submit_manual_order(
         self,
         session_id: str,
