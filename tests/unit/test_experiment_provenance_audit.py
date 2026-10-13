@@ -35,7 +35,7 @@ def make_experiment(
     strategy_version: str = "1.0.0",
     dataset_id: str = "NSE_NIFTY50_DAILY",
     dataset_version: str = "2026.09.14",
-    dataset_checksum: str = "a" * 64,
+    dataset_checksum: str = "a6f02b56a45115e8c038fdb697fbd9b1347fb227a519e9404d6262f7cf7e7ce2",
     initial_capital: float = 500_000.0,
 ) -> ExperimentDefinition:
     return ExperimentDefinition(

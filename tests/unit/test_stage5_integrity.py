@@ -32,7 +32,7 @@ from apps.api.routes.experiments import set_service
 def make_test_exp(
     exp_id: str,
     capital: float = 500_000.0,
-    dataset_checksum: str = "f" * 64,
+    dataset_checksum: str = "a6f02b56a45115e8c038fdb697fbd9b1347fb227a519e9404d6262f7cf7e7ce2",
     params: dict = None,
 ) -> ExperimentDefinition:
     return ExperimentDefinition(

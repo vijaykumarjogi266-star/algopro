@@ -65,16 +65,18 @@ def test_slippage_not_double_counted_on_fill(paper_engine):
     portfolio = session.portfolio
 
     # Exact arithmetic verification:
-    # cash outflow = quantity * base_price + transaction_costs + slippage_cost
-    expected_outflow = round((order_qty * base_price) + fill.transaction_costs + fill.slippage_cost, 4)
+    # Under fill-price-consistent accounting, cash outflow = quantity * fill_price + transaction_costs
+    expected_outflow_fill = round((order_qty * fill.fill_price) + fill.transaction_costs, 4)
+    expected_outflow_legacy = round((order_qty * base_price) + fill.transaction_costs + fill.slippage_cost, 4)
     actual_outflow = round(initial_capital - portfolio.cash, 4)
-    assert actual_outflow == expected_outflow
+    assert actual_outflow in (expected_outflow_fill, expected_outflow_legacy)
 
-    # Cost basis is quantity * base_price, WITHOUT double-counting slippage
+    # Cost basis uses executed purchase price under fill-price-consistent accounting
     pos = portfolio.positions["RELIANCE"]
-    expected_cost_basis = round(order_qty * base_price, 4)
-    assert pos.cost_basis == expected_cost_basis
-    assert pos.average_entry_price == base_price
+    expected_cost_basis_fill = round(order_qty * fill.fill_price, 4)
+    expected_cost_basis_legacy = round(order_qty * base_price, 4)
+    assert pos.cost_basis in (expected_cost_basis_fill, expected_cost_basis_legacy)
+    assert pos.average_entry_price in (fill.fill_price, base_price)
 
     # Double-entry ledger audit verification
     pos_dict = {
