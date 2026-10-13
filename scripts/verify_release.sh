@@ -29,8 +29,12 @@ echo "[PASS] Python and TypeScript syntax/types clean."
 # 3. Maintained unit, contract, integration test suites
 echo ">>> [3/11] Unit, contract, and integration test suites..."
 python3 -m pytest \
+  tests/integration/test_python312_startup.py \
   tests/integration/test_security_configuration.py \
-  tests/integration/test_authorization.py \
+  tests/integration/test_authorization_enforcement.py \
+  tests/integration/test_execution_control_wiring.py \
+  tests/unit/test_durable_breaker_recovery.py \
+  tests/unit/test_release_gate.py \
   tests/integration/test_credential_error_redaction.py \
   tests/browser/test_stored_xss.py \
   tests/unit/test_circuit_breaker_state_integrity.py \
@@ -44,7 +48,7 @@ python3 -m pytest \
   tests/integration/test_backup_failure_modes.py \
   tests/unit/test_research_integrity.py \
   -q --disable-warnings
-echo "[PASS] Safety-critical test suites passed (86 passed)."
+echo "[PASS] Safety-critical test suites passed."
 
 # 4. Coverage measurement
 echo ">>> [4/11] Module-level test coverage check..."

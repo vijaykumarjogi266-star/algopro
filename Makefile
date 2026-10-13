@@ -1,8 +1,9 @@
-.PHONY: help install compile lint typecheck test test-security test-browser build test-deployment release-check
+.PHONY: help install import-check compile lint typecheck test test-security test-browser build test-deployment security-scan release-check
 
 help:
 	@echo "Algo Lab Makefile Targets:"
 	@echo "  make install         - Install dependencies"
+	@echo "  make import-check    - Verify Python 3.12 startup and module imports"
 	@echo "  make compile         - Compile Python source files"
 	@echo "  make lint            - Run syntax and lint checks"
 	@echo "  make typecheck       - Run Python and TypeScript type checks"
@@ -11,6 +12,7 @@ help:
 	@echo "  make test-browser    - Run browser/XSS test suites"
 	@echo "  make build           - Build frontend and verify Python packages"
 	@echo "  make test-deployment - Run deployment and container tests"
+	@echo "  make security-scan   - Run static analysis security scan"
 	@echo "  make release-check   - Run complete release gate verification"
 
 install:
@@ -18,6 +20,9 @@ install:
 	@if command -v npm >/dev/null 2>&1; then \
 		npm --prefix apps/web install --prefer-offline --no-audit --no-fund; \
 	fi
+
+import-check:
+	python3 -m pytest tests/integration/test_python312_startup.py -v
 
 compile:
 	python3 -m compileall -q apps data database quant services
@@ -65,6 +70,13 @@ build: compile
 
 test-deployment:
 	python3 -m pytest tests/deployment/ -v
+
+security-scan:
+	@if command -v bandit >/dev/null 2>&1; then \
+		bandit -r apps/ services/ -ll --skip B101,B311; \
+	else \
+		echo "bandit not installed"; \
+	fi
 
 release-check:
 	@bash scripts/verify_release.sh
