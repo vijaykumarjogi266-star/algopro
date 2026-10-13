@@ -2,7 +2,8 @@
 
 from datetime import datetime, timezone
 from typing import List
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from apps.api.core.auth import Role, require_reader
 from apps.api.core.config import settings
 from apps.api.schemas.health import SafetyStatusResponse, SystemInfoResponse
 
@@ -38,7 +39,7 @@ NON_NEGOTIABLE_PRINCIPLES: List[str] = [
 
 
 @router.get("/info", response_model=SystemInfoResponse, summary="Get system status and safety locks")
-async def get_system_info() -> SystemInfoResponse:
+async def get_system_info(_role: Role = Depends(require_reader)) -> SystemInfoResponse:
     return SystemInfoResponse(
         name=settings.PROJECT_NAME,
         version=settings.PROJECT_VERSION,
@@ -63,6 +64,6 @@ async def get_system_info() -> SystemInfoResponse:
 
 
 @router.get("/principles", response_model=List[str], summary="List 25 non-negotiable quantitative principles")
-async def get_principles() -> List[str]:
+async def get_principles(_role: Role = Depends(require_reader)) -> List[str]:
     """Returns the immutable 25 principles governing all Algo Lab research and engines."""
     return NON_NEGOTIABLE_PRINCIPLES

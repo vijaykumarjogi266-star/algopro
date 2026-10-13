@@ -26,6 +26,7 @@ from services.execution_gateway.contracts import (
     CircuitBreakerTripped,
     WatchdogTimeoutError,
     RateLimitExceededError,
+    OrderPayload,
 )
 
 logger = logging.getLogger(__name__)

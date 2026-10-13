@@ -8,10 +8,13 @@ Adheres to Non-Negotiable Principles:
 """
 
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from apps.api.core.auth import Role, require_operator, require_reader
+from apps.api.routes.circuit_breaker import get_circuit_breaker
 from services.backtest_engine.contracts import OrderSide
+from services.execution_gateway.contracts import CircuitBreakerTripped, RateLimitExceededError
 from services.paper_engine.session import (
     PaperTradingEngine,
     PaperSession,
@@ -21,8 +24,12 @@ from services.paper_engine.adapters.credentials import ExecutionEnvironment, LIV
 
 router = APIRouter(prefix="/paper-trading", tags=["Paper Trading Engine"])
 
-# Global shared paper trading engine instance
-paper_engine = PaperTradingEngine()
+# Global shared paper trading engine instance wired with circuit breaker
+paper_engine = PaperTradingEngine(circuit_breaker=get_circuit_breaker())
+
+
+def get_paper_engine() -> PaperTradingEngine:
+    return paper_engine
 
 
 class CreatePaperSessionRequest(BaseModel):
@@ -45,7 +52,10 @@ class SubmitPaperOrderRequest(BaseModel):
 
 
 @router.post("/sessions", response_model=PaperSession, status_code=status.HTTP_201_CREATED, summary="Create paper trading session")
-async def create_paper_session(req: CreatePaperSessionRequest) -> PaperSession:
+async def create_paper_session(
+    req: CreatePaperSessionRequest,
+    _role: Role = Depends(require_operator),
+) -> PaperSession:
     """Creates a new isolated paper trading session.
     
     Hard Security Rule: Rejects LIVE execution environment fail-closed.
@@ -75,13 +85,18 @@ async def create_paper_session(req: CreatePaperSessionRequest) -> PaperSession:
 
 
 @router.get("/sessions", response_model=List[PaperSession], summary="List all paper trading sessions")
-async def list_paper_sessions() -> List[PaperSession]:
+async def list_paper_sessions(
+    _role: Role = Depends(require_reader),
+) -> List[PaperSession]:
     """Lists all paper trading sessions with real-time portfolio values."""
     return paper_engine.list_sessions()
 
 
 @router.get("/sessions/{session_id}", response_model=PaperSession, summary="Get paper session detail & portfolio")
-async def get_paper_session(session_id: str) -> PaperSession:
+async def get_paper_session(
+    session_id: str,
+    _role: Role = Depends(require_reader),
+) -> PaperSession:
     """Retrieves session state, active positions, cash balance, and execution history."""
     session = paper_engine.get_session(session_id)
     if not session:
@@ -90,7 +105,10 @@ async def get_paper_session(session_id: str) -> PaperSession:
 
 
 @router.post("/sessions/{session_id}/start", response_model=PaperSession, summary="Start paper trading session")
-async def start_session(session_id: str) -> PaperSession:
+async def start_session(
+    session_id: str,
+    _role: Role = Depends(require_operator),
+) -> PaperSession:
     """Transitions session to RUNNING state."""
     try:
         return paper_engine.start_session(session_id)
@@ -99,7 +117,10 @@ async def start_session(session_id: str) -> PaperSession:
 
 
 @router.post("/sessions/{session_id}/pause", response_model=PaperSession, summary="Pause paper trading session")
-async def pause_session(session_id: str) -> PaperSession:
+async def pause_session(
+    session_id: str,
+    _role: Role = Depends(require_operator),
+) -> PaperSession:
     """Transitions session to PAUSED state."""
     try:
         return paper_engine.pause_session(session_id)
@@ -108,7 +129,10 @@ async def pause_session(session_id: str) -> PaperSession:
 
 
 @router.post("/sessions/{session_id}/stop", response_model=PaperSession, summary="Stop paper trading session")
-async def stop_session(session_id: str) -> PaperSession:
+async def stop_session(
+    session_id: str,
+    _role: Role = Depends(require_operator),
+) -> PaperSession:
     """Transitions session to STOPPED state."""
     try:
         return paper_engine.stop_session(session_id)
@@ -117,8 +141,12 @@ async def stop_session(session_id: str) -> PaperSession:
 
 
 @router.post("/sessions/{session_id}/orders", summary="Submit risk-gated paper order")
-async def submit_paper_order(session_id: str, req: SubmitPaperOrderRequest):
-    """Proposes an order, verifies against the independent Risk Engine, and executes paper fill."""
+async def submit_paper_order(
+    session_id: str,
+    req: SubmitPaperOrderRequest,
+    _role: Role = Depends(require_operator),
+):
+    """Proposes an order, verifies against the independent Risk Engine and Circuit Breaker, and executes paper fill."""
     try:
         order, fill = paper_engine.submit_manual_order(
             session_id=session_id,
@@ -135,5 +163,7 @@ async def submit_paper_order(session_id: str, req: SubmitPaperOrderRequest):
             "fill": fill.model_dump() if fill else None,
             "status": order.state.value,
         }
+    except (CircuitBreakerTripped, RateLimitExceededError) as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Circuit breaker halt: {str(e)}")
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

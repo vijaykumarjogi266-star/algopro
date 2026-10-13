@@ -133,7 +133,10 @@ def validate_experiment_payload(req: ExperimentCreateRequest) -> ExperimentValid
 
 
 @router.post("/validate", response_model=ExperimentValidationResponse, summary="Validate experiment configuration (dry-run)")
-def validate_experiment(req: ExperimentValidateRequest):
+def validate_experiment(
+    req: ExperimentValidateRequest,
+    _role: Role = Depends(require_researcher),
+):
     return validate_experiment_payload(req)
 
 
@@ -185,6 +188,7 @@ def list_experiments(
     status: Optional[str] = Query(default=None),
     strategy_id: Optional[str] = Query(default=None),
     service: BacktestService = Depends(get_service),
+    _role: Role = Depends(require_reader),
 ):
     exps = service.store.list_experiments(limit=limit, offset=offset, status=status, strategy_id=strategy_id)
     return ExperimentListResponse(
@@ -199,6 +203,7 @@ def list_experiments(
 def get_experiment(
     experiment_id: str,
     service: BacktestService = Depends(get_service),
+    _role: Role = Depends(require_reader),
 ):
     exp = service.store.get_experiment(experiment_id)
     if not exp:
@@ -227,6 +232,7 @@ def get_run_status(
     experiment_id: str,
     run_id: str,
     service: BacktestService = Depends(get_service),
+    _role: Role = Depends(require_reader),
 ):
     run = service.store.get_run(run_id)
     if not run:
@@ -257,6 +263,7 @@ def get_run_results(
     experiment_id: str,
     run_id: str,
     service: BacktestService = Depends(get_service),
+    _role: Role = Depends(require_reader),
 ):
     run = service.store.get_run(run_id)
     if not run:
@@ -288,6 +295,7 @@ def get_run_audit_trail(
     experiment_id: str,
     run_id: str,
     service: BacktestService = Depends(get_service),
+    _role: Role = Depends(require_reader),
 ):
     run = service.store.get_run(run_id)
     if not run:
@@ -308,6 +316,7 @@ def get_run_audit_trail(
 def compare_experiments(
     req: ExperimentCompareRequest,
     service: BacktestService = Depends(get_service),
+    _role: Role = Depends(require_reader),
 ):
     baseline_exp = service.store.get_experiment(req.baseline_experiment_id)
     if not baseline_exp:
@@ -366,6 +375,7 @@ def compare_experiments(
 def get_experiment_provenance(
     experiment_id: str,
     service: BacktestService = Depends(get_service),
+    _role: Role = Depends(require_reader),
 ):
     exp = service.store.get_experiment(experiment_id)
     if not exp:

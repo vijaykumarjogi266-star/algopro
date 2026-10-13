@@ -13,8 +13,9 @@ Security model:
 
 import hashlib
 import hmac
+import json
 from enum import Enum
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import HTTPException, Header, Security, status
 from fastapi.security import APIKeyHeader
@@ -42,10 +43,74 @@ ROLE_HIERARCHY = {
 }
 
 
+def get_configured_key_roles() -> Dict[str, Role]:
+    """Retrieve all configured API keys and their server-bound roles."""
+    key_roles: Dict[str, Role] = {}
+
+    # JSON key-to-role map
+    if getattr(settings, "ALGO_LAB_API_KEYS_JSON", None):
+        try:
+            data = json.loads(settings.ALGO_LAB_API_KEYS_JSON)
+            if isinstance(data, dict):
+                for k, r in data.items():
+                    if k and isinstance(k, str) and k.strip():
+                        try:
+                            key_roles[k.strip()] = Role(str(r).strip().lower())
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+
+    # Role-specific environment keys
+    if getattr(settings, "ALGO_LAB_API_KEY_READER", None) and settings.ALGO_LAB_API_KEY_READER.strip():
+        key_roles[settings.ALGO_LAB_API_KEY_READER.strip()] = Role.READER
+
+    if getattr(settings, "ALGO_LAB_API_KEY_RESEARCHER", None) and settings.ALGO_LAB_API_KEY_RESEARCHER.strip():
+        key_roles[settings.ALGO_LAB_API_KEY_RESEARCHER.strip()] = Role.RESEARCHER
+
+    if getattr(settings, "ALGO_LAB_API_KEY_OPERATOR", None) and settings.ALGO_LAB_API_KEY_OPERATOR.strip():
+        key_roles[settings.ALGO_LAB_API_KEY_OPERATOR.strip()] = Role.OPERATOR
+
+    if getattr(settings, "ALGO_LAB_API_KEY_ADMIN", None) and settings.ALGO_LAB_API_KEY_ADMIN.strip():
+        key_roles[settings.ALGO_LAB_API_KEY_ADMIN.strip()] = Role.ADMINISTRATOR
+
+    # Primary master admin key (backward-compatible)
+    if settings.ALGO_LAB_API_KEY and settings.ALGO_LAB_API_KEY.strip():
+        key_roles[settings.ALGO_LAB_API_KEY.strip()] = Role.ADMINISTRATOR
+
+    return key_roles
+
+
+def has_configured_keys() -> bool:
+    """Return True if at least one API key is configured."""
+    return bool(get_configured_key_roles())
+
+
+def resolve_key_role(api_key: Optional[str]) -> Optional[Role]:
+    """Constant-time lookup matching api_key against configured keys and returning bound Role."""
+    if not api_key:
+        return None
+
+    configured_map = get_configured_key_roles()
+    if not configured_map:
+        return None
+
+    provided_hash = hashlib.sha256(api_key.encode("utf-8")).digest()
+    matched_role: Optional[Role] = None
+
+    for candidate_key, assigned_role in configured_map.items():
+        candidate_hash = hashlib.sha256(candidate_key.encode("utf-8")).digest()
+        if hmac.compare_digest(provided_hash, candidate_hash):
+            matched_role = assigned_role
+
+    return matched_role
+
+
 def validate_api_key_at_startup() -> None:
     """Validate security settings during application lifespan."""
     if settings.ENVIRONMENT == "production":
-        if not settings.ALGO_LAB_API_KEY or not settings.ALGO_LAB_API_KEY.strip():
+        admin_key = settings.ALGO_LAB_API_KEY or getattr(settings, "ALGO_LAB_API_KEY_ADMIN", "")
+        if not admin_key or not admin_key.strip():
             raise RuntimeError(
                 "ALGO_LAB_API_KEY must be configured in production environments."
             )
@@ -61,12 +126,11 @@ def authenticate_request(
     - 401 Unauthorized if key is missing when required.
     - 403 Forbidden if key is invalid or requested role exceeds permission.
     """
-    configured_key = settings.ALGO_LAB_API_KEY.strip() if settings.ALGO_LAB_API_KEY else ""
+    configured_keys = get_configured_key_roles()
 
     # Allow local development/testing bypass only if explicitly enabled or key is not configured
-    if not configured_key:
+    if not configured_keys:
         if settings.ENVIRONMENT in ("development", "testing") or settings.ALLOW_LOCAL_AUTH_BYPASS:
-            # Grant default role or requested role for local development
             if requested_role_header:
                 try:
                     return Role(requested_role_header.strip().lower())
@@ -81,26 +145,21 @@ def authenticate_request(
             detail="API authentication not configured on server.",
         )
 
-    # In production or when configured_key is set:
+    # In production or when keys are configured:
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="X-API-Key header required",
         )
 
-    provided_hash = hashlib.sha256(api_key.encode()).digest()
-    expected_hash = hashlib.sha256(configured_key.encode()).digest()
-
-    if not hmac.compare_digest(provided_hash, expected_hash):
+    assigned_role = resolve_key_role(api_key)
+    if assigned_role is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid API key",
         )
 
-    # Master key grants administrator privileges by default
-    assigned_role = Role.ADMINISTRATOR
-
-    # If caller specifies a role (e.g. for least-privilege testing or delegation), down-scope
+    # If caller specifies a role (e.g. down-scoping for least privilege), check hierarchy
     if requested_role_header:
         try:
             target_role = Role(requested_role_header.strip().lower())
@@ -109,6 +168,7 @@ def authenticate_request(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unknown role '{requested_role_header}'",
             )
+        # Rejection: caller cannot escalate to a role higher than the server-bound assigned role
         if ROLE_HIERARCHY[target_role] > ROLE_HIERARCHY[assigned_role]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -131,7 +191,7 @@ def require_role(min_role: Role):
     return _role_checker
 
 
-# Convenient role dependencies
+# Role dependencies
 require_reader = require_role(Role.READER)
 require_researcher = require_role(Role.RESEARCHER)
 require_operator = require_role(Role.OPERATOR)

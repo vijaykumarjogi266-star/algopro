@@ -7,9 +7,10 @@ Adheres to Non-Negotiable Principles:
 """
 
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
+from apps.api.core.auth import Role, require_reader, require_researcher
 from data.schemas.canonical_market_data import CanonicalMarketDataBar
 from services.market_data.registry import (
     DatasetRecord,
@@ -50,13 +51,16 @@ class QuarantineDatasetRequest(BaseModel):
 
 
 @router.get("", response_model=List[DatasetRecord], summary="List all registered datasets")
-async def list_datasets() -> List[DatasetRecord]:
+async def list_datasets(_role: Role = Depends(require_reader)) -> List[DatasetRecord]:
     """Returns all registered datasets with versions and checksums."""
     return registry_store.list_datasets()
 
 
 @router.post("/register", response_model=DatasetRecord, status_code=status.HTTP_201_CREATED, summary="Register a versioned dataset")
-async def register_dataset(req: RegisterDatasetRequest) -> DatasetRecord:
+async def register_dataset(
+    req: RegisterDatasetRequest,
+    _role: Role = Depends(require_researcher),
+) -> DatasetRecord:
     """Registers a dataset partition with cryptographic SHA-256 checksum."""
     record = DatasetRecord(
         dataset_id=req.dataset_id,
@@ -76,7 +80,10 @@ async def register_dataset(req: RegisterDatasetRequest) -> DatasetRecord:
 
 
 @router.get("/{dataset_id}", response_model=DatasetRecord, summary="Get dataset metadata")
-async def get_dataset(dataset_id: str) -> DatasetRecord:
+async def get_dataset(
+    dataset_id: str,
+    _role: Role = Depends(require_reader),
+) -> DatasetRecord:
     """Retrieves dataset manifest by ID."""
     record = registry_store.get_dataset(dataset_id)
     if not record:
@@ -85,7 +92,11 @@ async def get_dataset(dataset_id: str) -> DatasetRecord:
 
 
 @router.post("/{dataset_id}/verify", summary="Verify dataset cryptographic integrity (drift detection)")
-async def verify_dataset(dataset_id: str, req: VerifyDatasetRequest):
+async def verify_dataset(
+    dataset_id: str,
+    req: VerifyDatasetRequest,
+    _role: Role = Depends(require_researcher),
+):
     """Verifies incoming canonical bars against registered SHA-256 hash. Fails closed on drift."""
     try:
         registry_store.verify_dataset_integrity(dataset_id, req.bars, fail_closed=True)
@@ -103,7 +114,11 @@ async def verify_dataset(dataset_id: str, req: VerifyDatasetRequest):
 
 
 @router.post("/{dataset_id}/quarantine", response_model=DatasetRecord, summary="Quarantine corrupted dataset")
-async def quarantine_dataset(dataset_id: str, req: QuarantineDatasetRequest) -> DatasetRecord:
+async def quarantine_dataset(
+    dataset_id: str,
+    req: QuarantineDatasetRequest,
+    _role: Role = Depends(require_researcher),
+) -> DatasetRecord:
     """Quarantines dataset, preventing any future trading decision."""
     try:
         return registry_store.quarantine_dataset(dataset_id, reason=req.reason)

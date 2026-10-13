@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from apps.api.core.auth import Role, require_operator
+from apps.api.core.auth import Role, require_administrator, require_reader
 from services.paper_engine.adapters.credentials import (
     BrokerConnectionConfig,
     BrokerCredentialStore,
@@ -33,7 +33,7 @@ class SaveConnectionRequest(BaseModel):
 
 
 @router.get("/connections", response_model=List[Dict[str, Any]], summary="List broker connections (masked credentials)")
-async def list_connections() -> List[Dict[str, Any]]:
+async def list_connections(_role: Role = Depends(require_reader)) -> List[Dict[str, Any]]:
     """Returns configured broker connections with all secrets strictly masked."""
     return credential_store.list_connections(masked=True)
 
@@ -41,7 +41,7 @@ async def list_connections() -> List[Dict[str, Any]]:
 @router.post("/connections", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, summary="Create or update broker connection")
 async def save_connection(
     req: SaveConnectionRequest,
-    _role: Role = Depends(require_operator),
+    _role: Role = Depends(require_administrator),
 ) -> Dict[str, Any]:
     """Saves a broker adapter configuration.
     
@@ -71,7 +71,10 @@ async def save_connection(
 
 
 @router.get("/connections/{connection_id}", response_model=Dict[str, Any], summary="Get connection details (masked)")
-async def get_connection(connection_id: str) -> Dict[str, Any]:
+async def get_connection(
+    connection_id: str,
+    _role: Role = Depends(require_reader),
+) -> Dict[str, Any]:
     """Retrieves connection configuration with all secrets strictly masked."""
     config = credential_store.get_connection(connection_id)
     if not config:
@@ -80,7 +83,10 @@ async def get_connection(connection_id: str) -> Dict[str, Any]:
 
 
 @router.post("/connections/{connection_id}/test", summary="Test broker adapter connection")
-async def test_connection(connection_id: str):
+async def test_connection(
+    connection_id: str,
+    _role: Role = Depends(require_administrator),
+):
     """Executes connectivity test with broker adapter."""
     res = credential_store.test_connection(connection_id)
     if res.get("status") == "NOT_FOUND":
@@ -89,7 +95,10 @@ async def test_connection(connection_id: str):
 
 
 @router.delete("/connections/{connection_id}", summary="Delete broker connection")
-async def delete_connection(connection_id: str):
+async def delete_connection(
+    connection_id: str,
+    _role: Role = Depends(require_administrator),
+):
     """Deletes connection configuration."""
     deleted = credential_store.delete_connection(connection_id)
     if not deleted:

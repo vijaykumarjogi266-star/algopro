@@ -15,7 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from apps.api.core.auth import validate_api_key_at_startup
+from apps.api.core.auth import has_configured_keys, resolve_key_role, validate_api_key_at_startup
 from apps.api.core.config import is_invalid_secret, settings
 from apps.api.core.logging import get_logger, setup_logging
 from apps.api.routes.health import router as health_router
@@ -38,8 +38,10 @@ PUBLIC_PATHS = {
     "/",
     "/health",
     "/health/ready",
+    "/health/live",
     f"{settings.API_V1_PREFIX}/health",
     f"{settings.API_V1_PREFIX}/health/ready",
+    f"{settings.API_V1_PREFIX}/health/live",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -53,7 +55,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     validate_api_key_at_startup()
 
     if settings.ENVIRONMENT == "production":
-        if is_invalid_secret(settings.ALGO_LAB_API_KEY):
+        admin_key = settings.ALGO_LAB_API_KEY or getattr(settings, "ALGO_LAB_API_KEY_ADMIN", "")
+        if is_invalid_secret(admin_key):
             raise RuntimeError("ALGO_LAB_API_KEY must be configured in production.")
         if is_invalid_secret(settings.BROKER_CREDENTIAL_ENCRYPTION_KEY):
             raise RuntimeError("BROKER_CREDENTIAL_ENCRYPTION_KEY must be configured in production.")
@@ -117,25 +120,25 @@ async def security_and_telemetry_middleware(request: Request, call_next):
     path = request.url.path
 
     # Enforce API Key authentication on all non-public routes in production or when auth is enabled
-    is_public = path in PUBLIC_PATHS or path.startswith("/docs") or path.startswith("/redoc")
+    is_public = (
+        path in PUBLIC_PATHS
+        or path.startswith("/docs")
+        or path.startswith("/redoc")
+        or path.startswith("/research")
+    )
 
     if not is_public:
         enforce_auth = (
             settings.ENVIRONMENT == "production"
-            or (bool(settings.ALGO_LAB_API_KEY) and not settings.ALLOW_LOCAL_AUTH_BYPASS)
+            or (has_configured_keys() and not settings.ALLOW_LOCAL_AUTH_BYPASS)
         )
         if enforce_auth:
             api_key = request.headers.get("X-API-Key", "")
             if not api_key:
                 return JSONResponse(status_code=401, content={"detail": "X-API-Key header required"})
 
-            configured_key = settings.ALGO_LAB_API_KEY.strip() if settings.ALGO_LAB_API_KEY else ""
-            if not configured_key:
-                return JSONResponse(status_code=500, content={"detail": "ALGO_LAB_API_KEY not configured on server"})
-
-            provided_hash = hashlib.sha256(api_key.encode()).digest()
-            expected_hash = hashlib.sha256(configured_key.encode()).digest()
-            if not hmac.compare_digest(provided_hash, expected_hash):
+            role = resolve_key_role(api_key)
+            if role is None:
                 return JSONResponse(status_code=403, content={"detail": "Invalid API key"})
 
     request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))

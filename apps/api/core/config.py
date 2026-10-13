@@ -67,8 +67,14 @@ class Settings(BaseSettings):
 
     # Security Configuration
     ALGO_LAB_API_KEY: str = ""
+    ALGO_LAB_API_KEY_ADMIN: str = ""
+    ALGO_LAB_API_KEY_OPERATOR: str = ""
+    ALGO_LAB_API_KEY_RESEARCHER: str = ""
+    ALGO_LAB_API_KEY_READER: str = ""
+    ALGO_LAB_API_KEYS_JSON: str = ""
     CIRCUIT_BREAKER_REARM_SECRET: str = ""
     CIRCUIT_BREAKER_STATE_KEY: str = ""
+    CIRCUIT_BREAKER_STATE_PATH: str = "data/circuit_breaker_state.json"
     BROKER_CREDENTIAL_ENCRYPTION_KEY: str = ""
     ALLOW_LOCAL_AUTH_BYPASS: bool = False
 
@@ -132,10 +138,23 @@ class Settings(BaseSettings):
                     "cannot be enabled in production environment."
                 )
 
-            if is_invalid_secret(self.ALGO_LAB_API_KEY):
+            admin_key = self.ALGO_LAB_API_KEY or self.ALGO_LAB_API_KEY_ADMIN
+            if is_invalid_secret(admin_key):
                 raise ValueError(
                     "Production startup failed: ALGO_LAB_API_KEY must be a strong, non-placeholder secret."
                 )
+
+            for role_key_name in (
+                "ALGO_LAB_API_KEY_ADMIN",
+                "ALGO_LAB_API_KEY_OPERATOR",
+                "ALGO_LAB_API_KEY_RESEARCHER",
+                "ALGO_LAB_API_KEY_READER",
+            ):
+                val = getattr(self, role_key_name, None)
+                if val and str(val).strip() in PLACEHOLDER_SECRETS:
+                    raise ValueError(
+                        f"Production startup failed: {role_key_name} contains a known placeholder secret."
+                    )
 
             if is_invalid_secret(self.CIRCUIT_BREAKER_REARM_SECRET):
                 raise ValueError(

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from data.schemas.contracts import OHLCVBar
@@ -14,6 +14,8 @@ from services.data_quality.engine import (
     DataQualityGateException,
 )
 from services.market_data.storage import DatasetManifest, ParquetMarketDataStorage
+
+from apps.api.core.auth import Role, require_reader, require_researcher
 
 router = APIRouter(prefix="/data", tags=["Market Data & Quality"])
 
@@ -37,7 +39,9 @@ class DataValidationRequest(BaseModel):
 
 
 @router.get("/session/status", response_model=SessionStatusResponse, summary="Current Indian Market session status")
-async def get_session_status() -> SessionStatusResponse:
+async def get_session_status(
+    _role: Role = Depends(require_reader),
+) -> SessionStatusResponse:
     """Returns real-time status of Indian market trading session in IST."""
     now_utc = datetime.now(timezone.utc)
     ist_dt = calendar.to_ist(now_utc)
@@ -54,13 +58,19 @@ async def get_session_status() -> SessionStatusResponse:
 
 
 @router.get("/instruments", response_model=List[Instrument], summary="List canonical instruments")
-async def list_instruments(only_active: bool = False) -> List[Instrument]:
+async def list_instruments(
+    only_active: bool = False,
+    _role: Role = Depends(require_reader),
+) -> List[Instrument]:
     """Returns instrument master specifications with survivorship metadata."""
     return instruments.list_instruments(only_active=only_active)
 
 
 @router.post("/validate", response_model=ComprehensiveDataQualityReport, summary="Validate bar sequence across 11 dimensions")
-async def validate_bars(req: DataValidationRequest) -> ComprehensiveDataQualityReport:
+async def validate_bars(
+    req: DataValidationRequest,
+    _role: Role = Depends(require_researcher),
+) -> ComprehensiveDataQualityReport:
     """Executes full 11-dimensional data quality verification pipeline."""
     report = quality_engine.validate_dataset(
         bars=req.bars,

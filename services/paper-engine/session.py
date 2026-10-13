@@ -34,6 +34,12 @@ from services.paper_engine.adapters.base import (
     PaperExecutionProvider,
     SimulatedBrokerAdapter,
 )
+from services.execution_gateway.circuit_breaker import CircuitBreakerEngine
+from services.execution_gateway.contracts import (
+    CircuitBreakerTripped,
+    OrderPayload,
+    RateLimitExceededError,
+)
 from apps.api.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -223,6 +229,7 @@ class PaperTradingEngine:
         db_path: str = ":memory:",
         lifecycle_manager: Optional[ExecutionLifecycleManager] = None,
         broker_adapter: Optional[PaperExecutionProvider] = None,
+        circuit_breaker: Optional[CircuitBreakerEngine] = None,
     ):
         self.db_path = db_path
         self._lock = threading.RLock()
@@ -235,6 +242,7 @@ class PaperTradingEngine:
 
         self.lifecycle_manager = lifecycle_manager or ExecutionLifecycleManager()
         self.broker_adapter = broker_adapter or SimulatedBrokerAdapter()
+        self.circuit_breaker = circuit_breaker
         self._sessions: Dict[str, PaperSession] = {}
         self._init_db()
 
@@ -398,7 +406,20 @@ class PaperTradingEngine:
             if session.status != SessionStatus.RUNNING:
                 raise ValueError(f"Cannot submit order to session in state {session.status}")
 
-            # 1. Propose order
+            # 1. Validate against Execution Gateway Circuit Breaker if attached
+            if self.circuit_breaker is not None:
+                payload = OrderPayload(
+                    order_id=f"ord_{uuid.uuid4().hex[:8]}",
+                    account_id=session.broker_connection_id or session.session_id,
+                    symbol=symbol,
+                    quantity=quantity if side == OrderSide.BUY else -quantity,
+                    price=price,
+                    timestamp=datetime.now(timezone.utc),
+                    strategy_id=session.strategy_id,
+                )
+                self.circuit_breaker.validate_order(payload)
+
+            # 2. Propose order
             order = self.lifecycle_manager.propose_order(
                 symbol=symbol,
                 side=side,
@@ -408,7 +429,7 @@ class PaperTradingEngine:
                 target_price=target_price,
             )
 
-            # 2. Risk check against session portfolio metrics & cash solvency
+            # 3. Risk check against session portfolio metrics & cash solvency
             evaluated = self.lifecycle_manager.evaluate_risk(
                 order,
                 current_portfolio_value=session.portfolio.total_equity,
@@ -420,17 +441,19 @@ class PaperTradingEngine:
 
             session.orders.append(evaluated)
 
-            # 3. If rejected, ZERO mutation occurs
+            # 4. If rejected, ZERO mutation occurs
             if evaluated.state == OrderLifecycleState.ORDER_REJECTED:
                 self._persist_session(session)
                 return evaluated, None
 
-            # 4. Fill via adapter
+            # 5. Fill via adapter
             filled_order, fill = self.broker_adapter.submit_paper_order(evaluated, execution_price=price)
             session.fills.append(fill)
 
-            # 5. Mutate portfolio with fill
+            # 6. Mutate portfolio with fill
             session.portfolio.on_fill(fill)
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.update_equity(session.portfolio.total_equity)
             self._persist_session(session)
 
             return filled_order, fill

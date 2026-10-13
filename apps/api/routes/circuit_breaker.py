@@ -1,17 +1,23 @@
 """Algo Lab Circuit Breaker Administrative Control Route."""
 
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from apps.api.core.auth import Role, require_administrator
+from apps.api.core.auth import Role, require_administrator, require_reader
+from apps.api.core.config import settings
 from services.execution_gateway.circuit_breaker import CircuitBreakerEngine, GatewayState
 
 router = APIRouter(prefix="/circuit-breaker", tags=["Circuit Breaker Administration"])
 
-_circuit_breaker: CircuitBreakerEngine = CircuitBreakerEngine()
+_circuit_breaker: Optional[CircuitBreakerEngine] = None
 
 
 def get_circuit_breaker() -> CircuitBreakerEngine:
+    global _circuit_breaker
+    if _circuit_breaker is None:
+        state_path = getattr(settings, "CIRCUIT_BREAKER_STATE_PATH", "data/circuit_breaker_state.json")
+        _circuit_breaker = CircuitBreakerEngine(state_file_path=state_path)
     return _circuit_breaker
 
 
@@ -62,6 +68,7 @@ def rearm_circuit_breaker(
 @router.get("/status", summary="Get circuit breaker runtime status")
 def get_circuit_breaker_status(
     cb: CircuitBreakerEngine = Depends(get_circuit_breaker),
+    _role: Role = Depends(require_reader),
 ):
     """Returns runtime health and state of the circuit breaker."""
     return {

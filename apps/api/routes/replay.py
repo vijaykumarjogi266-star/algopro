@@ -9,7 +9,7 @@ Adheres to Non-Negotiable Principles:
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import uuid
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from data.schemas.canonical_market_data import CanonicalMarketDataBar
@@ -19,6 +19,8 @@ from services.backtest_engine.replay import (
     ReplayEvent,
     LookAheadBiasError,
 )
+
+from apps.api.core.auth import Role, require_reader, require_researcher
 
 router = APIRouter(prefix="/replay", tags=["Historical Market Replay"])
 
@@ -46,7 +48,10 @@ class ReplayRunResponse(BaseModel):
 
 
 @router.post("/run", response_model=ReplayRunResponse, summary="Execute deterministic historical replay simulation")
-async def run_replay(req: ReplayRunRequest) -> ReplayRunResponse:
+async def run_replay(
+    req: ReplayRunRequest,
+    _role: Role = Depends(require_researcher),
+) -> ReplayRunResponse:
     """Executes a deterministic historical market replay with strict look-ahead guard."""
     if not req.bars:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Replay dataset cannot be empty.")
@@ -85,7 +90,10 @@ async def run_replay(req: ReplayRunRequest) -> ReplayRunResponse:
 
 
 @router.get("/status/{replay_id}", response_model=ReplayRunResponse, summary="Get historical replay run status")
-async def get_replay_status(replay_id: str) -> ReplayRunResponse:
+async def get_replay_status(
+    replay_id: str,
+    _role: Role = Depends(require_reader),
+) -> ReplayRunResponse:
     """Retrieves status and metadata of completed historical replay simulation."""
     info = _replay_runs.get(replay_id)
     if not info:
