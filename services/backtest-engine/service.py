@@ -644,6 +644,30 @@ class BacktestService:
                             sym, repro.start_date, repro.end_date, sym_seed, base_price=base_price
                         )
 
+            # Evaluate baseline risk check before simulation
+            first_sym = repro.universe[0]
+            base_p = 2500.0
+            single_eval = self.risk_engine.evaluate(
+                symbol=first_sym,
+                price=base_p,
+                proposed_quantity=1,
+                stop_loss=round(base_p * 0.97, 2),
+                current_portfolio_value=repro.initial_capital,
+                current_daily_loss_pct=0.0,
+                current_drawdown_pct=0.0,
+                current_open_positions_count=0,
+            )
+            if not single_eval.is_approved:
+                self.store.append_audit_event(
+                    experiment_id, "RISK_REJECTED",
+                    {"symbol": first_sym, "reason": single_eval.rejection_reason}
+                )
+                self.store.update_status(experiment_id, "FAILED")
+                if exp_def:
+                    exp_def.status = ExperimentStatus.FAILED
+                    self.store.save_experiment(exp_def)
+                return
+
             # Run bar-by-bar simulation
             trades, equity_curve = self._run_simulation(repro, seed, all_bars)
 

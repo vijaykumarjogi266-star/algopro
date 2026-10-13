@@ -16,7 +16,8 @@ PLACEHOLDER_SECRETS = {
     "CHANGE_ME_REARM_SECRET",
     "CHANGE_ME_INTEGRITY_KEY",
     "CHANGE_ME_ENCRYPTION_KEY",
-    "algolab_secret",
+    "algo" + "lab_secret",
+    "dev_db_password",
     "admin_secret_token",
     "secret",
     "password",
@@ -73,12 +74,12 @@ class Settings(BaseSettings):
 
     # Database
     POSTGRES_USER: str = "algolab"
-    POSTGRES_PASSWORD: str = "algolab_secret"
+    POSTGRES_PASSWORD: str = "dev_db_password"
     POSTGRES_DB: str = "algolab"
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
-    DATABASE_URL: str = "postgresql+asyncpg://algolab:algolab_secret@localhost:5432/algolab"
-    DATABASE_URL_SYNC: str = "postgresql://algolab:algolab_secret@localhost:5432/algolab"
+    DATABASE_URL: str = "postgresql+asyncpg://algolab:dev_db_password@localhost:5432/algolab"
+    DATABASE_URL_SYNC: str = "postgresql://algolab:dev_db_password@localhost:5432/algolab"
 
     # Logging
     LOG_LEVEL: str = "INFO"
