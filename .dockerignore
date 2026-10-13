@@ -10,6 +10,14 @@
 *.db
 *.sqlite
 *.sqlite3
+*-wal
+*-shm
+*.backup*
+*.bak
+data/*.db*
+data/*.json
+circuit_breaker_state.json
+data/circuit_breaker_state.json
 data/app.db
 algo_lab_paper.db
 
