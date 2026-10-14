@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
+import math
 from pydantic import BaseModel, Field
 
 from data.schemas.canonical_market_data import CanonicalMarketDataBar
@@ -44,7 +45,7 @@ class ExecutionOrder(BaseModel):
     side: OrderSide
     order_type: OrderType = OrderType.MARKET
     quantity: int = Field(gt=0)
-    proposed_price: float = Field(gt=0.0)
+    proposed_price: float = 0.0
     limit_price: Optional[float] = None
     stop_loss: Optional[float] = None
     target_price: Optional[float] = None
@@ -202,6 +203,22 @@ class ExecutionLifecycleManager:
             raise ValueError(f"Cannot evaluate risk on order in state {order.state}")
 
         order.transition_to(OrderLifecycleState.RISK_CHECK_EVALUATED, reason="Submitting to Risk Engine")
+
+        # Validate proposed price is strictly positive and finite (E04)
+        if (
+            order.proposed_price is None
+            or not isinstance(order.proposed_price, (int, float))
+            or not math.isfinite(order.proposed_price)
+            or order.proposed_price <= 0
+        ):
+            order.rejection_code = RiskRejectionCode.EXCEEDS_MAX_CAPITAL.value
+            order.rejection_reason = f"Invalid order price: {order.proposed_price}. Price must be strictly positive and finite."
+            order.transition_to(
+                OrderLifecycleState.ORDER_REJECTED,
+                reason=order.rejection_reason,
+                rejection_code=order.rejection_code,
+            )
+            return order
 
         # 1. Exit / Square-off orders: prevent overselling or naked shorting
         if order.side == OrderSide.SELL:

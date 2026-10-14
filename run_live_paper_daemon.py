@@ -21,6 +21,8 @@ from typing import Dict, Optional, Tuple, Any
 import pandas as pd
 import numpy as np
 
+from services.market_data.calendar import IndianMarketCalendar
+
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 # Indian Standard Time (IST, UTC+5:30)
@@ -63,6 +65,9 @@ def get_daemon_phase(
     if not is_market_day:
         return DaemonPhase.MAINTENANCE
     ist_dt = get_ist_now(dt_ist)
+    cal = IndianMarketCalendar()
+    if not cal.is_trading_day(ist_dt.date()):
+        return DaemonPhase.MAINTENANCE
     minutes = ist_dt.hour * 60 + ist_dt.minute
     if 9 * 60 <= minutes < 9 * 60 + 15:
         return DaemonPhase.PREMARKET
@@ -478,6 +483,8 @@ class DaemonController:
     def is_halted(self) -> bool:
         if self.circuit_breaker is not None and getattr(self.circuit_breaker, "is_halted", False):
             return True
+        if self.session is not None and self.session.status in (SessionStatus.PAUSED, SessionStatus.EMERGENCY_HALT):
+            return True
         return self._is_emergency_halted
 
     @property
@@ -485,7 +492,11 @@ class DaemonController:
         if self.circuit_breaker is not None and getattr(self.circuit_breaker, "is_halted", False):
             reasons = getattr(self.circuit_breaker, "trip_reasons", [])
             return ", ".join(reasons) if reasons else "CIRCUIT_BREAKER_EMERGENCY_HALT"
-        return self._emergency_halt_reason
+        if self._emergency_halt_reason:
+            return self._emergency_halt_reason
+        if self.session is not None and self.session.status in (SessionStatus.PAUSED, SessionStatus.EMERGENCY_HALT):
+            return f"SESSION_STATUS_{self.session.status.value}"
+        return None
 
     def trigger_emergency_halt(self, reason: str = "MANUAL_EMERGENCY_HALT") -> None:
         self._is_emergency_halted = True
@@ -606,18 +617,23 @@ class DaemonController:
                     side=OrderSide.SELL,
                     quantity=pos.quantity,
                     price=float(quote_price),
+                    current_time=ref_time,
                 )
                 self.session = self.paper_engine.get_session(self.session.session_id)
                 self.trade_stops.pop(sym_key, None)
                 self.trade_targets.pop(sym_key, None)
                 self.trade_entry_times.pop(sym_key, None)
-                squared_off.append({
-                    "symbol": sym,
-                    "quantity": pos.quantity,
-                    "price": float(quote_price),
-                    "fill": fill is not None,
-                })
-                log_msg(f"[SQUARE-OFF] Squared off {pos.quantity} of {sym} at valid quote INR {quote_price:.2f}.")
+                if fill is not None:
+                    squared_off.append({
+                        "symbol": sym,
+                        "quantity": pos.quantity,
+                        "price": float(quote_price),
+                        "fill": True,
+                    })
+                    log_msg(f"[SQUARE-OFF] Squared off {pos.quantity} of {sym} at valid quote INR {quote_price:.2f}.")
+                else:
+                    rej = getattr(order, "rejection_reason", "Risk evaluation rejected order")
+                    errors.append({"symbol": sym, "error": f"Square off order rejected: {rej}"})
             except Exception as e:
                 err_msg = f"Failed to submit square-off order for {sym}: {e}"
                 log_msg(f"[ERROR] {err_msg}")
@@ -633,7 +649,27 @@ class DaemonController:
                 session_date=self.current_session_date,
                 text_value=json.dumps(errors),
             )
-            log_msg(f"[CRITICAL ALERT] Unresolved square-off persisted: {len(errors)} error(s), {rem_positions} remaining position(s).")
+            # E05: Mark retained positions as quarantined
+            for err in errors:
+                err_sym = err.get("symbol", "").upper()
+                pos_obj = self.session.portfolio.positions.get(err_sym)
+                if pos_obj:
+                    pos_obj.is_quarantined = True
+                    pos_obj.quarantine_reason = err.get("error", "Unresolved square-off failure")
+            for sym_k, pos_obj in self.session.portfolio.positions.items():
+                if pos_obj.quantity > 0:
+                    pos_obj.is_quarantined = True
+                    if not pos_obj.quarantine_reason:
+                        pos_obj.quarantine_reason = "Cutoff unresolved: position quarantined"
+
+            # E07: Forced exit failure transitions session to EMERGENCY_HALT
+            halt_msg = f"Forced exit failure during square-off: {len(errors)} error(s), {rem_positions} remaining position(s)."
+            self.trigger_emergency_halt(reason=halt_msg)
+            if self.session:
+                self.session.status = SessionStatus.EMERGENCY_HALT
+                self.paper_engine._persist_session(self.session)
+
+            log_msg(f"[CRITICAL ALERT] Unresolved square-off persisted: {len(errors)} error(s), {rem_positions} remaining position(s). Emergency halt triggered.")
             self.sentinel.dispatcher.notify(
                 title="CRITICAL: Unresolved Square-Off",
                 message=f"Mandatory square-off incomplete. Positions retained: {rem_positions}. Errors: {errors}",
@@ -659,6 +695,14 @@ class DaemonController:
                 session_date=self.current_session_date,
                 text_value="",
             )
+            # Clear emergency halt upon verified square-off resolution
+            if self._is_emergency_halted and "Forced exit failure during square-off" in (self._emergency_halt_reason or ""):
+                self._is_emergency_halted = False
+                self._emergency_halt_reason = None
+                save_sentinel_state(self.db_path, "emergency_halt", 0.0, session_date=self.current_session_date, text_value="")
+                if self.session and self.session.status == SessionStatus.EMERGENCY_HALT:
+                    self.session.status = SessionStatus.RUNNING
+                    self.paper_engine._persist_session(self.session)
             return {
                 "status": "COMPLETED",
                 "squared_off": squared_off,
@@ -678,9 +722,12 @@ class DaemonController:
 
         sessions = self.paper_engine.list_sessions()
         for s in sessions:
-            if s.status == SessionStatus.RUNNING:
+            if s.status in (SessionStatus.RUNNING, SessionStatus.PAUSED, SessionStatus.EMERGENCY_HALT):
                 self.session = self.paper_engine.get_session(s.session_id)
                 break
+
+        cal = IndianMarketCalendar()
+        is_open, _ = cal.is_regular_trading_session(ist_now)
 
         if not self.session:
             self.session = self.paper_engine.create_session(
@@ -689,7 +736,20 @@ class DaemonController:
                 universe=self.universe,
                 initial_capital=self.buying_power,
             )
-            self.paper_engine.start_session(self.session.session_id)
+            if is_open:
+                self.paper_engine.start_session(self.session.session_id)
+            else:
+                self.paper_engine.pause_session(self.session.session_id)
+        else:
+            # Reconnect during closed session: keep trading paused/halted (E08)
+            if not is_open:
+                if self.session.status == SessionStatus.RUNNING:
+                    self.paper_engine.pause_session(self.session.session_id)
+                    self.session = self.paper_engine.get_session(self.session.session_id)
+            if self.session.status == SessionStatus.EMERGENCY_HALT:
+                self._is_emergency_halted = True
+                if not self._emergency_halt_reason:
+                    self._emergency_halt_reason = "SESSION_STATUS_EMERGENCY_HALT"
 
         eq = current_equity if current_equity is not None else self.session.portfolio.total_equity
 
@@ -874,6 +934,8 @@ class DaemonController:
                             side=OrderSide.SELL,
                             quantity=pos.quantity,
                             price=exit_price,
+                            current_time=ist_now,
+                            quote_timestamp=data.get("bar_timestamp") or ist_now,
                         )
                         self.session = self.paper_engine.get_session(self.session.session_id)
                         self.trade_stops.pop(sym_key, None)
@@ -932,6 +994,8 @@ class DaemonController:
                         side=OrderSide.SELL,
                         quantity=pos.quantity,
                         price=current_sl,
+                        current_time=ist_now,
+                        quote_timestamp=data.get("bar_timestamp") or ist_now,
                     )
                     self.session = self.paper_engine.get_session(self.session.session_id)
                     self.trade_stops.pop(sym_key, None)
@@ -944,6 +1008,8 @@ class DaemonController:
                         side=OrderSide.SELL,
                         quantity=pos.quantity,
                         price=current_tp,
+                        current_time=ist_now,
+                        quote_timestamp=data.get("bar_timestamp") or ist_now,
                     )
                     self.session = self.paper_engine.get_session(self.session.session_id)
                     self.trade_stops.pop(sym_key, None)
@@ -1049,6 +1115,8 @@ class DaemonController:
                         decision_id=dec_id,
                         parameters=params,
                         data_provenance=data_prov,
+                        current_time=ist_now,
+                        quote_timestamp=data.get("bar_timestamp") or ist_now,
                     )
                     self.session = self.paper_engine.get_session(self.session.session_id)
                     if fill:

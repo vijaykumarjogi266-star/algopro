@@ -9,13 +9,14 @@ Adheres to Non-Negotiable Principles:
   LIVE trading execution is hard-disabled.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 import json
 import sqlite3
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
+import math
 from pydantic import BaseModel, Field
 
 from data.schemas.canonical_market_data import CanonicalMarketDataBar
@@ -26,6 +27,8 @@ from services.backtest_engine.execution_lifecycle import (
     ExecutionFill,
     OrderLifecycleState,
 )
+from services.risk_engine.contracts import RiskRejectionCode
+from services.market_data.calendar import IndianMarketCalendar, IST_TZ
 from services.paper_engine.adapters.credentials import (
     ExecutionEnvironment,
     LIVE_TRADING_ENABLED,
@@ -53,6 +56,7 @@ class SessionStatus(str, Enum):
     STOPPED = "STOPPED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    EMERGENCY_HALT = "EMERGENCY_HALT"
 
 
 class PositionDetail(BaseModel):
@@ -69,6 +73,8 @@ class PositionDetail(BaseModel):
     realized_pnl: float = 0.0
     fees_paid: float = 0.0
     slippage_paid: float = 0.0
+    is_quarantined: bool = False
+    quarantine_reason: Optional[str] = None
     opened_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -506,6 +512,9 @@ class PaperTradingEngine:
         decision_id: Optional[str] = None,
         parameters: Optional[Dict[str, Any]] = None,
         data_provenance: Optional[Dict[str, Any]] = None,
+        current_time: Optional[datetime] = None,
+        quote_timestamp: Optional[datetime] = None,
+        max_quote_age_seconds: float = 900.0,
     ) -> Tuple[ExecutionOrder, Optional[ExecutionFill]]:
         """Proposes, risk-evaluates, and executes an order in the session portfolio.
         
@@ -516,13 +525,155 @@ class PaperTradingEngine:
             if not session:
                 raise ValueError(f"Session {session_id} not found.")
 
-            if session.status != SessionStatus.RUNNING:
+            if session.status in (SessionStatus.STOPPED, SessionStatus.COMPLETED, SessionStatus.FAILED):
                 raise ValueError(f"Cannot submit order to session in state {session.status}")
+            if session.status in (SessionStatus.PAUSED, SessionStatus.EMERGENCY_HALT) and side != OrderSide.SELL:
+                raise ValueError(f"Cannot submit buy order to session in state {session.status}")
 
             strat_id = strategy_id or session.strategy_id
             strat_ver = strategy_version or session.strategy_version
 
-            # 1. Validate against Execution Gateway Circuit Breaker if attached
+            # 1. Price validation: must be strictly positive and finite (E04)
+            if price is None or not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
+                order = self.lifecycle_manager.propose_order(
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price if (price is not None and isinstance(price, (int, float)) and not math.isnan(price)) else 0.0,
+                    stop_loss=stop_loss,
+                    target_price=target_price,
+                    strategy_id=strat_id,
+                    strategy_version=strat_ver,
+                    decision_id=decision_id,
+                    parameters=parameters,
+                    data_provenance=data_provenance,
+                )
+                order.rejection_code = RiskRejectionCode.EXCEEDS_MAX_CAPITAL.value
+                order.rejection_reason = f"Invalid order price: {price}. Price must be strictly positive and finite."
+                order.transition_to(
+                    OrderLifecycleState.ORDER_REJECTED,
+                    reason=order.rejection_reason,
+                    rejection_code=order.rejection_code,
+                )
+                session.orders.append(order)
+                self._persist_session(session)
+                return order, None
+
+            # 2. Calendar & Session check: reject weekend, holiday, out-of-session (E01, E02)
+            if current_time is not None:
+                cal = IndianMarketCalendar()
+                is_valid_session, session_reason = cal.is_regular_trading_session(current_time)
+                if not is_valid_session:
+                    order = self.lifecycle_manager.propose_order(
+                        symbol=symbol,
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        stop_loss=stop_loss,
+                        target_price=target_price,
+                        strategy_id=strat_id,
+                        strategy_version=strat_ver,
+                        decision_id=decision_id,
+                        parameters=parameters,
+                        data_provenance=data_provenance,
+                    )
+                    order.rejection_code = RiskRejectionCode.SESSION_CLOSED.value
+                    order.rejection_reason = session_reason
+                    order.transition_to(
+                        OrderLifecycleState.ORDER_REJECTED,
+                        reason=session_reason,
+                        rejection_code=order.rejection_code,
+                    )
+                    session.orders.append(order)
+                    self._persist_session(session)
+                    return order, None
+
+            # 3. Quote freshness / staleness check (E03)
+            if quote_timestamp is not None:
+                cal = IndianMarketCalendar()
+                ref_dt = current_time if current_time is not None else datetime.now(timezone.utc)
+                ref_ist = cal.to_ist(ref_dt)
+                quote_ist = cal.to_ist(quote_timestamp) if getattr(quote_timestamp, "tzinfo", None) is not None else quote_timestamp.replace(tzinfo=IST_TZ)
+
+                if quote_ist > ref_ist + timedelta(seconds=60):
+                    order = self.lifecycle_manager.propose_order(
+                        symbol=symbol,
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        stop_loss=stop_loss,
+                        target_price=target_price,
+                        strategy_id=strat_id,
+                        strategy_version=strat_ver,
+                        decision_id=decision_id,
+                        parameters=parameters,
+                        data_provenance=data_provenance,
+                    )
+                    order.rejection_code = RiskRejectionCode.STALE_MARKET_DATA.value
+                    order.rejection_reason = f"Future quote timestamp: {quote_timestamp} is ahead of reference time {ref_dt}"
+                    order.transition_to(
+                        OrderLifecycleState.ORDER_REJECTED,
+                        reason=order.rejection_reason,
+                        rejection_code=order.rejection_code,
+                    )
+                    session.orders.append(order)
+                    self._persist_session(session)
+                    return order, None
+
+                age_sec = (ref_ist - quote_ist).total_seconds()
+                if age_sec > max_quote_age_seconds:
+                    order = self.lifecycle_manager.propose_order(
+                        symbol=symbol,
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        stop_loss=stop_loss,
+                        target_price=target_price,
+                        strategy_id=strat_id,
+                        strategy_version=strat_ver,
+                        decision_id=decision_id,
+                        parameters=parameters,
+                        data_provenance=data_provenance,
+                    )
+                    order.rejection_code = RiskRejectionCode.STALE_MARKET_DATA.value
+                    order.rejection_reason = f"Stale quote timestamp: age {age_sec:.1f}s exceeds maximum allowed {max_quote_age_seconds}s"
+                    order.transition_to(
+                        OrderLifecycleState.ORDER_REJECTED,
+                        reason=order.rejection_reason,
+                        rejection_code=order.rejection_code,
+                    )
+                    session.orders.append(order)
+                    self._persist_session(session)
+                    return order, None
+
+            # 4. Quarantined position check: prevent averaging into quarantined positions (E05)
+            existing_pos = session.portfolio.positions.get(symbol.upper())
+            if existing_pos and existing_pos.is_quarantined and side == OrderSide.BUY:
+                order = self.lifecycle_manager.propose_order(
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    stop_loss=stop_loss,
+                    target_price=target_price,
+                    strategy_id=strat_id,
+                    strategy_version=strat_ver,
+                    decision_id=decision_id,
+                    parameters=parameters,
+                    data_provenance=data_provenance,
+                )
+                order.rejection_code = RiskRejectionCode.PROHIBITED_INSTRUMENT.value
+                order.rejection_reason = f"Position for {symbol} is quarantined ({existing_pos.quarantine_reason}). Additional BUY orders prohibited until verified recovery."
+                order.transition_to(
+                    OrderLifecycleState.ORDER_REJECTED,
+                    reason=order.rejection_reason,
+                    rejection_code=order.rejection_code,
+                )
+                session.orders.append(order)
+                self._persist_session(session)
+                return order, None
+
+            # 3. Validate against Execution Gateway Circuit Breaker if attached
             if self.circuit_breaker is not None:
                 payload = OrderPayload(
                     order_id=f"ord_{uuid.uuid4().hex[:8]}",
@@ -530,7 +681,7 @@ class PaperTradingEngine:
                     symbol=symbol,
                     quantity=quantity if side == OrderSide.BUY else -quantity,
                     price=price,
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=current_time or datetime.now(timezone.utc),
                     strategy_id=strat_id,
                 )
                 self.circuit_breaker.validate_order(payload)

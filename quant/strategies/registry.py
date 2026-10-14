@@ -216,6 +216,8 @@ StrategyRegistry.register(
         "EMA_MOMENTUM",
         "EMA_CROSSOVER",
         "CANONICAL_SMA",
+        "STRAT_ALPHA",
+        "ALPHA",
     ],
 )
 
