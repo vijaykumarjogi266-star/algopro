@@ -63,6 +63,13 @@ def _to_bar_dict(b: Any) -> Dict[str, Any]:
     }
 
 
+def _format_ts(ts: Any) -> str:
+    """Format market timestamp into strict ISO-8601 string."""
+    if isinstance(ts, datetime):
+        return ts.isoformat()
+    return str(ts)
+
+
 def _calculate_trade_costs(trade_value: float, side: str, cost_cfg: CostModelConfig) -> float:
     """Calculates all declared statutory and brokerage transaction costs."""
     brokerage = float(getattr(cost_cfg, "brokerage_per_crore_or_order", 0.0))
@@ -488,10 +495,11 @@ class BacktestService:
         prev_close_val = float(repro.initial_capital)
         positions: Dict[str, Dict[str, Any]] = {}
         equity_curve: List[float] = []
+        equity_points: List[Dict[str, Any]] = []
 
         timeline = sorted(set(b["date"] for bars in all_bars.values() for b in bars))
         if not timeline:
-            return trades, [cash]
+            return trades, [cash], [{"timestamp": _format_ts(repro.start_date), "equity": cash, "cash": cash, "positions_value": 0.0}]
 
         bar_by_sym_ts: Dict[str, Dict[Any, Dict[str, Any]]] = {
             sym: {b["date"]: b for b in bars} for sym, bars in all_bars.items()
@@ -561,6 +569,8 @@ class BacktestService:
                         "symbol": sym,
                         "entry_bar": pos["entry_bar"],
                         "exit_bar": t_idx,
+                        "entry_time": pos.get("entry_time", current_ts),
+                        "exit_time": current_ts,
                         "entry_price": entry_p,
                         "exit_price": exit_price,
                         "qty": qty,
@@ -581,22 +591,31 @@ class BacktestService:
                         sym_has_entered.add(sym)
 
             # 2. Fill pending entries at open
+            processed_entries = set()
             for sym, sig_price in list(pending_entries.items()):
                 if current_ts not in bar_by_sym_ts.get(sym, {}):
                     continue
+                processed_entries.add(sym)
                 bar = bar_by_sym_ts[sym][current_ts]
                 if sym not in positions:
                     raw_entry = bar["open"]
                     entry_p, slip_pts = _calculate_slippage_price(raw_entry, "BUY", slip_cfg)
                     if is_buy_and_hold:
                         from quant.strategies.buy_and_hold import BuyAndHold
-                        bh_strat = BuyAndHold(parameters={
-                            "allocation_pct": float(params.get("allocation_pct", 1.0)),
-                            "universe": repro.universe,
-                            "weights": params.get("weights", {}),
-                        })
-                        weight = bh_strat.get_allocation_weight(sym)
-                        capital_per_trade = repro.initial_capital * weight
+                        if "allocation_pct" in params or "weights" in params:
+                            bh_strat = BuyAndHold(parameters={
+                                "allocation_pct": float(params.get("allocation_pct", 1.0)),
+                                "universe": repro.universe,
+                                "weights": params.get("weights", {}),
+                            })
+                            weight = bh_strat.get_allocation_weight(sym)
+                            capital_per_trade = repro.initial_capital * weight
+                        else:
+                            bh_strat = BuyAndHold(parameters={
+                                "universe": repro.universe,
+                                "weights": params.get("weights", {}),
+                            })
+                            capital_per_trade = (min(cash * 0.045, repro.initial_capital * 0.045)) / max(1, len(repro.universe))
                         stop_loss = round(entry_p * 0.50, 2)
                     else:
                         capital_per_trade = min(cash * 0.045, repro.initial_capital * 0.045)
@@ -644,6 +663,7 @@ class BacktestService:
                         "qty": qty,
                         "entry_price": entry_p,
                         "entry_bar": t_idx,
+                        "entry_time": current_ts,
                         "stop_loss": stop_loss,
                         "entry_cost": buy_cost,
                         "entry_slippage": slip_pts * qty,
@@ -664,6 +684,8 @@ class BacktestService:
                             "symbol": sym,
                             "entry_bar": t_idx,
                             "exit_bar": t_idx,
+                            "entry_time": current_ts,
+                            "exit_time": current_ts,
                             "entry_price": entry_p,
                             "exit_price": exit_price,
                             "qty": qty,
@@ -675,7 +697,8 @@ class BacktestService:
                         })
                         del positions[sym]
 
-            pending_entries.clear()
+            for sym in processed_entries:
+                pending_entries.pop(sym, None)
 
             # 3. Mark-to-market portfolio value at current_ts close
             for sym in all_bars:
@@ -690,6 +713,12 @@ class BacktestService:
             )
             close_equity = cash + pos_val
             equity_curve.append(close_equity)
+            equity_points.append({
+                "timestamp": _format_ts(current_ts),
+                "equity": close_equity,
+                "cash": cash,
+                "positions_value": pos_val,
+            })
             prev_close_val = close_equity
             if close_equity > peak_portfolio_val:
                 peak_portfolio_val = close_equity
@@ -716,6 +745,7 @@ class BacktestService:
 
         # Close any open positions at the last known close price
         if timeline:
+            final_ts = timeline[-1]
             for sym, pos in list(positions.items()):
                 raw_exit = last_known_close.get(sym, pos["entry_price"])
                 exit_price, slip_pts = _calculate_slippage_price(raw_exit, "SELL", slip_cfg)
@@ -732,6 +762,8 @@ class BacktestService:
                     "symbol": sym,
                     "entry_bar": pos["entry_bar"],
                     "exit_bar": len(timeline) - 1,
+                    "entry_time": pos.get("entry_time", final_ts),
+                    "exit_time": final_ts,
                     "entry_price": pos["entry_price"],
                     "exit_price": exit_price,
                     "qty": qty,
@@ -743,8 +775,13 @@ class BacktestService:
                 })
             if equity_curve:
                 equity_curve[-1] = cash
+            if equity_points:
+                equity_points[-1]["equity"] = cash
+                equity_points[-1]["cash"] = cash
+                equity_points[-1]["positions_value"] = 0.0
 
-        return trades, equity_curve
+        pending_entries.clear()
+        return trades, equity_curve, equity_points
 
     def _run_job(self, experiment_id: str, repro: ReproducibilityRecord) -> None:
         """Executes bar-by-bar simulation with strict fail-closed data and risk checks."""
@@ -1124,7 +1161,7 @@ class BacktestService:
 
             seed = int(repro.reproducibility_hash[:8], 16)
             # Run bar-by-bar simulation
-            trades, equity_curve = self._run_simulation(repro, seed, all_bars, strategy_id=strat_id)
+            trades, equity_curve, equity_points = self._run_simulation(repro, seed, all_bars, strategy_id=strat_id)
 
             # Audit first signal and filled trade if any
             if trades:
@@ -1158,6 +1195,11 @@ class BacktestService:
 
             # Save trades and equity curve
             for idx, t in enumerate(trades):
+                entry_ts = t.get("entry_time")
+                exit_ts = t.get("exit_time")
+                entry_ts_str = _format_ts(entry_ts) if entry_ts else repro.start_date.isoformat()
+                exit_ts_str = _format_ts(exit_ts) if exit_ts else repro.end_date.isoformat()
+
                 self.store.save_trade(
                     experiment_id=experiment_id,
                     trade={
@@ -1166,8 +1208,8 @@ class BacktestService:
                         "strategy_id": strat_id,
                         "strategy_version": "1.0.0",
                         "side": "BUY",
-                        "entry_timestamp": repro.start_date.isoformat(),
-                        "exit_timestamp": repro.end_date.isoformat(),
+                        "entry_timestamp": entry_ts_str,
+                        "exit_timestamp": exit_ts_str,
                         "entry_price": t["entry_price"],
                         "exit_price": t["exit_price"],
                         "quantity": t["qty"],
@@ -1184,13 +1226,13 @@ class BacktestService:
                     }
                 )
 
-            for b_idx, eq in enumerate(equity_curve):
+            for pt in equity_points:
                 self.store.save_equity_point(
                     experiment_id=experiment_id,
-                    timestamp=(repro.start_date + timedelta(days=b_idx)).isoformat(),
-                    equity=eq,
-                    cash=eq,
-                    positions_value=0.0,
+                    timestamp=pt["timestamp"],
+                    equity=pt["equity"],
+                    cash=pt["cash"],
+                    positions_value=pt["positions_value"],
                 )
 
             self.store.update_status(experiment_id, "COMPLETED", metrics=metrics)
