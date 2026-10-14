@@ -1,8 +1,10 @@
-.PHONY: help install import-check compile lint typecheck test test-security test-browser build test-deployment security-scan release-check
+.PHONY: help install verify-locks sbom import-check compile lint typecheck test test-security test-browser build test-deployment security-scan release-check
 
 help:
 	@echo "Algo Lab Makefile Targets:"
-	@echo "  make install         - Install dependencies"
+	@echo "  make install         - Install dependencies from pinned lockfile"
+	@echo "  make verify-locks    - Verify dependency lockfile consistency and integrity"
+	@echo "  make sbom            - Generate CycloneDX JSON Software Bill of Materials"
 	@echo "  make import-check    - Verify Python 3.12 startup and module imports"
 	@echo "  make compile         - Compile Python source files"
 	@echo "  make lint            - Run syntax and lint checks"
@@ -13,13 +15,19 @@ help:
 	@echo "  make build           - Build frontend and verify Python packages"
 	@echo "  make test-deployment - Run deployment and container tests"
 	@echo "  make security-scan   - Run static analysis security scan"
-	@echo "  make release-check   - Run complete release gate verification"
+	@echo "  make release-check   - Run complete canonical release gate verification"
 
 install:
 	pip install -r requirements.lock
 	@if command -v npm >/dev/null 2>&1; then \
 		npm --prefix apps/web ci; \
 	fi
+
+verify-locks:
+	python3 scripts/verify_locks.py
+
+sbom:
+	python3 scripts/generate_sbom.py --output sbom.json
 
 import-check:
 	python3 -m pytest tests/integration/test_python312_startup.py -v
@@ -58,6 +66,9 @@ test-security:
 		tests/integration/test_actual_ledger_reconciliation.py \
 		tests/integration/test_backup_failure_modes.py \
 		tests/integration/test_protective_cutoff_failure_modes.py \
+		tests/unit/test_backup_restore_encryption.py \
+		tests/unit/test_architecture_isolation.py \
+		tests/unit/test_data_governance_lineage.py \
 		-v
 
 test-browser:

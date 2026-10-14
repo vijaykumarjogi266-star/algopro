@@ -19,7 +19,9 @@ BLOCKED_COUNT=0
 echo ">>> [1/11] Locked installation & dependency consistency..."
 test -f requirements.txt && test -f .python-version && test -f .nvmrc && test -f requirements.lock
 ! grep -q 'file:///home/builder' requirements.lock
-echo "[PASS] Dependency specifications and runtime lockfiles verified."
+python3 scripts/verify_locks.py
+python3 scripts/generate_sbom.py --output /tmp/algolab_release_sbom.json
+echo "[PASS] Dependency specifications, lockfiles, and CycloneDX SBOM verified."
 
 # 2. Syntax, compilation, and linting
 echo ">>> [2/11] Python syntax, compilation, and type checks..."
@@ -69,6 +71,9 @@ python3 -m pytest \
   tests/unit/test_manifest_freshness_and_replay.py \
   tests/unit/test_release_gate_behavior.py \
   tests/deployment/test_image_canary_layers.py \
+  tests/unit/test_data_governance_lineage.py \
+  tests/unit/test_architecture_isolation.py \
+  tests/unit/test_backup_restore_encryption.py \
   -q --disable-warnings
 echo "[PASS] Safety-critical test suites passed."
 

@@ -1,14 +1,18 @@
-name: Algo Lab CI
+name: Algo Lab Canonical Release CI
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
+  schedule:
+    # Nightly security and regression build at 02:00 UTC
+    - cron: '0 2 * * *'
 
 jobs:
-  backend-tests:
-    name: Backend Test Suite & Lint
+  release-gate:
+    name: Canonical Release Gate & Security Checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -20,45 +24,120 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -e .
-
-      - name: Run pytest test suite
-        run: |
-          pytest tests/ --cov=apps --cov=quant --cov=services --cov=data --cov-report=term-missing
-
-  frontend-build:
-    name: Next.js Frontend Verification
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/web
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: "npm"
           cache-dependency-path: apps/web/package-lock.json
 
-      - name: Install npm dependencies
-        run: npm ci
+      - name: Install locked Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install -e .
 
-      - name: Build Next.js application
+      - name: Verify strict paper-only safety invariants (Fail-closed)
+        run: |
+          python3 -c "
+          from apps.api.core.project_state import LIVE_TRADING_ENABLED, REAL_BROKER_EXECUTION_ENABLED
+          assert LIVE_TRADING_ENABLED is False, 'FATAL: LIVE_TRADING_ENABLED must be False'
+          assert REAL_BROKER_EXECUTION_ENABLED is False, 'FATAL: REAL_BROKER_EXECUTION_ENABLED must be False'
+          "
+
+      - name: Verify dependency locks and integrity
+        run: python3 scripts/verify_locks.py
+
+      - name: Python compile and import checks
+        run: |
+          python3 -m compileall -q apps data database quant services
+          pytest tests/integration/test_python312_startup.py -v
+
+      - name: Type checking (Python & TypeScript)
+        run: |
+          if command -v mypy >/dev/null 2>&1; then
+            mypy apps/ services/ --ignore-missing-imports --no-strict-optional
+          fi
+          cd apps/web && npm ci && npx tsc -p tsconfig.json --noEmit
+
+      - name: Comprehensive test suite & coverage enforcement
+        run: |
+          pytest tests/ \
+            --cov=apps \
+            --cov=quant \
+            --cov=services \
+            --cov=data \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=60
+
+      - name: Bandit Static Application Security Testing (SAST)
+        run: |
+          bandit -r apps/ services/ -ll --skip B101,B311
+
+      - name: Secret scanning & credential containment audit
+        run: |
+          python3 -c "
+          import os, sys
+          banned = ['ADMIN_SECURE_REARM_SECRET_KEY_8899', 'algolab_secret', 'ADMIN_AUTH_TOKEN_SECRET']
+          found = []
+          for root, _, files in os.walk('.'):
+              if any(x in root for x in ['.git', '.venv', 'node_modules', '__pycache__']):
+                  continue
+              for f in files:
+                  if f in ['verify_release.sh', 'audit_report.json', 'RELEASE_EVIDENCE.md']:
+                      continue
+                  p = os.path.join(root, f)
+                  try:
+                      with open(p, 'r', errors='ignore') as fp:
+                          content = fp.read()
+                          for b in banned:
+                              if b in content:
+                                  found.append((p, b))
+                  except Exception:
+                      pass
+          if found:
+              print('Found banned credentials:', found)
+              sys.exit(1)
+          "
+
+      - name: Generate CycloneDX SBOM
+        run: python3 scripts/generate_sbom.py --output sbom.json
+
+      - name: Frontend production build
+        working-directory: apps/web
         run: npm run build
 
-  docker-validation:
-    name: Docker Compose Syntax Validation
+      - name: Upload Release Audit Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-artifacts
+          path: |
+            coverage.xml
+            sbom.json
+            RELEASE_EVIDENCE.md
+            README.md
+
+  docker-gate:
+    name: Docker Build & Image Layer Canary Scan
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate Docker Compose
-        run: docker compose config
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Docker Compose Configuration
+        run: docker compose -f docker-compose.prod.yml config
+
+      - name: Build Docker API Container
+        run: docker build -f docker/Dockerfile.api -t algolab-api:latest .
+
+      - name: Run Docker Image Layer Secret Canary Scan
+        run: |
+          pip install pytest
+          pytest tests/deployment/test_image_canary_layers.py tests/deployment/test_image_secret_exclusion.py -v

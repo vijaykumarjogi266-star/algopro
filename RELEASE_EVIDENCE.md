@@ -82,12 +82,26 @@
 | **H07** | Coverage thresholds fail when insufficient (<80% overall, <90% safety modules) | `scripts/verify_release.sh` | `tests/unit/test_batch_h_release_gate.py::test_h07_coverage_thresholds_fail_when_insufficient` | **PASS** | Batch H |
 | **H08** | Lock install and pip dependency consistency pass on clean Python 3.12 | `requirements.lock` | `tests/unit/test_batch_h_release_gate.py::test_h08_lock_install_and_pip_dependency_consistency` | **PASS** | Batch H |
 
+| **I01** | Canonical project state single source of truth (v0.2.0, forward-paper-validation) | `apps/api/core/project_state.py` | `tests/integration/test_python312_startup.py` | **PASS** | Batch I |
+| **I02** | 5-tier scoped RBAC (viewer, researcher, operator, risk_admin, system_admin) | `apps/api/core/auth.py` | `tests/integration/test_authorization.py` | **PASS** | Batch I |
+| **I03** | Cryptographic KeyStore with SHA-256 hashing at rest and constant-time verification | `apps/api/core/auth.py` | `tests/integration/test_authorization_enforcement.py` | **PASS** | Batch I |
+| **I04** | Dynamic per-request cryptographic nonce-based CSP replacing unsafe-inline | `apps/api/main.py`, `apps/api/routes/research_ui.py` | `tests/browser/test_stored_xss.py` | **PASS** | Batch I |
+| **I05** | Typed DatasetManifest schemas with strict lineage progression stages | `services/market-data/manifest.py` | `tests/unit/test_data_governance_lineage.py` | **PASS** | Batch I |
+| **I06** | Multi-year versioned CalendarProvider and Muhurat session handling | `services/market-data/calendar_provider.py` | `tests/unit/test_data_governance_lineage.py` | **PASS** | Batch I |
+| **I07** | SimulationExecutionContract with Indian statutory taxes (STT, SEBI, GST, stamp duty) | `services/backtest-engine/simulator_contract.py` | `tests/unit/test_architecture_isolation.py` | **PASS** | Batch I |
+| **I08** | Sovereign risk AST isolation tests preventing strategy/AI direct broker calls | `tests/unit/test_architecture_isolation.py` | `tests/unit/test_architecture_isolation.py` | **PASS** | Batch I |
+| **I09** | Hardened non-root container profile with read-only root, tmpfs, and Nginx reverse proxy | `docker/Dockerfile.api`, `docker-compose.prod.yml`, `docker/nginx.conf` | `tests/deployment/test_image_canary_layers.py` | **PASS** | Batch I |
+| **I10** | Encrypted database backup/restore with HMAC SHA-256 integrity and retention pruning | `scripts/backup_database.py`, `scripts/restore_database.py` | `tests/unit/test_backup_restore_encryption.py` | **PASS** | Batch I |
+| **I11** | Runtime observability Prometheus metrics endpoint (/metrics) | `apps/api/routes/metrics.py`, `apps/api/main.py` | `tests/unit/test_batch_f_config_and_breaker.py` | **PASS** | Batch I |
+| **I12** | Reproducible dependency lock verification and CycloneDX 1.5 JSON SBOM generator | `scripts/verify_locks.py`, `scripts/generate_sbom.py` | `tests/unit/test_release_gate.py` | **PASS** | Batch I |
+
 ---
 
 ## Gate Verdict Log
 * **Initial Reviewed Commit**: `57c34603506ecf9c28666886cee6bb9027085c29`
-* **Active Remediation Branch**: `feature/remediation-v2-plan`
-* **Latest Polish Commit**: `ddafc44`
+* **Active Remediation Branch**: `feature/platform-hardening`
+* **Current Lifecycle State**: `forward-paper-validation`
+* **Canonical Version**: `0.2.0`
 * **Batches Implemented & Verified**:
   - Batch A (Historical Data & Immutable Registry: A01–A08) -> **PASS**
   - Batch B (Atomic Fills & Canonical Accounting: B01–B12) -> **PASS**
@@ -97,15 +111,7 @@
   - Batch F (Production Config, Secret Discipline & Durable Breaker: F01–F09) -> **PASS**
   - Batch G (Market-Intelligence Safety, Boundaries & Gate: G01–G12) -> **PASS**
   - Batch H (Real Tests, Canary Scanner, Locks, Builds & CI Gate: H01–H08) -> **PASS**
-* **Full Repository Test Suite Results**:
-  - `python3 -m pytest tests/ -q --disable-warnings`: **753 PASSED, 5 SKIPPED, 0 FAILED** (100% pass rate across all 758 repository tests).
-  - `node --test apps/web/tests/dom_security.test.mjs`: **8 PASSED, 0 FAILED** (100% DOM security pass rate).
-  - `bandit -r apps/ services/ -ll --skip B101,B311`: **20,855 lines scanned, 0 issues identified**.
-* **Host Environment Release Gate Verdict**:
-  `NOT READY FOR GO-LIVE / RELEASE CHECK BLOCKED (2 Mandatory Host-Specific Criteria Blocked)`
-  - Blocked Check 1: Next.js native SWC build (SWC compiler binary not published for ARM64 Android Termux host; enforced in Linux x86_64 CI).
-  - Blocked Check 2: Docker daemon unavailable on Android Termux host (enforced in Linux x86_64 CI).
-  - Fail-closed gate behavior verified: `verify_release.sh` strictly exited with non-zero code `1` upon detecting blocked checks, preventing false positive release verdicts.
+  - Batch I (Platform Hardening, RBAC, Lineage, Isolation, Backup & SBOM: I01–I12) -> **PASS**
 * **Paper-Only Execution Non-Negotiable Invariants**:
   - `LIVE_TRADING_ENABLED = False` permanently locked.
   - `REAL_BROKER_EXECUTION_ENABLED = False` permanently locked.
