@@ -5,9 +5,9 @@ Target is reversion back to VWAP benchmark.
 Adheres to Principle 11 (Indicators are evidence) and Principle 12 (RSI never auto-triggers orders).
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from data.schemas.contracts import OHLCVBar
-from quant.strategies.base import BaseStrategy
+from quant.strategies.base import BaseStrategy, SignalType, StrategyDecision
 from services.backtest_engine.trade_candidate import CandidateAction, TradeCandidate
 
 

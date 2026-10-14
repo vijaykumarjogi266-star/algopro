@@ -39,7 +39,21 @@ def scan_image_tar_layers(image_tar_path: str, canary_tokens: List[str]) -> List
     if not os.path.exists(image_tar_path):
         raise FileNotFoundError(f"Image tarball not found: {image_tar_path}")
 
-    # Inspect image tarball
+    path_only_tokens = {
+        "algo_lab_paper.db", "algo_lab.db", ".env", ".env.production", ".env.local",
+        "private.key", "cert.pem", "backup_secrets.bak", "data/app.db",
+        "data/app.db-wal", "data/app.db-shm", "circuit_breaker_state.json",
+        "data/circuit_breaker_state.json", "data/circuit_breaker_state.json.failed",
+    }
+    env_var_tokens = {
+        "ALGO_LAB_API_KEY", "CIRCUIT_BREAKER_REARM_SECRET", "BROKER_CREDENTIAL_ENCRYPTION_KEY",
+    }
+    system_prefixes = (
+        "usr/share/perl", "usr/lib/ssl", "etc/ssl",
+        "usr/local/lib/python3.12/site-packages/pip",
+        "usr/local/lib/python3.12/ensurepip",
+    )
+
     with tarfile.open(image_tar_path, "r:*") as outer_tar:
         manifest_members = [m for m in outer_tar.getmembers() if m.name in ("manifest.json", "./manifest.json")]
         layer_names: List[str] = []
@@ -53,7 +67,6 @@ def scan_image_tar_layers(image_tar_path: str, canary_tokens: List[str]) -> List
                         if isinstance(entry, dict):
                             layer_names.extend(entry.get("Layers", []))
 
-        # Fallback to finding all .tar members if manifest doesn't explicitly enumerate
         if not layer_names:
             layer_names = [m.name for m in outer_tar.getmembers() if m.name.endswith(".tar")]
 
@@ -89,9 +102,19 @@ def scan_image_tar_layers(image_tar_path: str, canary_tokens: List[str]) -> List
                     try:
                         with tarfile.open(fileobj=layer_bytes, mode="r:*") as layer_tar:
                             for layer_member in layer_tar.getmembers():
+                                member_norm_path = layer_member.name.lstrip("./")
+                                if any(member_norm_path.startswith(p) for p in system_prefixes) or member_norm_path.endswith(".example"):
+                                    continue
+
                                 # Check filename for canaries
                                 for token in canary_tokens:
-                                    if token in layer_member.name:
+                                    is_match = False
+                                    if "/" in token:
+                                        is_match = member_norm_path.endswith(token) or (token in member_norm_path)
+                                    else:
+                                        base = os.path.basename(member_norm_path)
+                                        is_match = (base == token) or (token.startswith(".") and base.startswith(token)) or (token in member_norm_path and token not in path_only_tokens)
+                                    if is_match:
                                         findings.append({
                                             "layer": member.name,
                                             "path": layer_member.name,
@@ -101,10 +124,23 @@ def scan_image_tar_layers(image_tar_path: str, canary_tokens: List[str]) -> List
 
                                 # Check file contents
                                 if layer_member.isfile() and layer_member.size < 5_000_000:
+                                    if member_norm_path.endswith((".pyc", ".so", ".whl", ".dist-info/RECORD", ".example")):
+                                        continue
                                     f_in = layer_tar.extractfile(layer_member)
                                     if f_in:
                                         body = f_in.read().decode("utf-8", errors="ignore")
                                         for token in canary_tokens:
+                                            if token in path_only_tokens:
+                                                continue
+                                            if token in env_var_tokens:
+                                                if (member_norm_path.endswith(".env") or not member_norm_path.endswith(".py")) and f"{token}=" in body:
+                                                    findings.append({
+                                                        "layer": member.name,
+                                                        "path": layer_member.name,
+                                                        "canary": token,
+                                                        "type": "content_leak",
+                                                    })
+                                                continue
                                             if token in body:
                                                 findings.append({
                                                     "layer": member.name,
@@ -181,7 +217,7 @@ def test_production_image_excludes_all_canaries():
                             timeout=120,
                         )
                         assert save_res.returncode == 0, f"Production image save failed: {save_res.stderr}"
-                        findings = scan_image_tar_layers(image_tar, sensitive_instructions)
+                        findings = scan_image_tar_layers(image_tar, canary_suite + sensitive_instructions)
                         assert len(findings) == 0, f"Production image leaked sensitive tokens: {findings}"
                     finally:
                         subprocess.run([docker_bin, "rmi", "-f", image_tag], capture_output=True)

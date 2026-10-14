@@ -18,7 +18,7 @@ import secrets
 import tempfile
 import threading
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from services.execution_gateway.contracts import (
     GatewayState,

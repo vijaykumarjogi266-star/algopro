@@ -7,6 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+if [ -d "$PROJECT_ROOT/.venv" ] && [ -z "$VIRTUAL_ENV" ]; then
+  source "$PROJECT_ROOT/.venv/bin/activate"
+fi
+
 export ALGO_LAB_RELEASE_VERIFY_RUNNING=1
 
 echo "=========================================================="
