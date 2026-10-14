@@ -6,7 +6,9 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "lint": "next lint"
+    "lint": "next lint",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:ci": "node --test tests/dom_security.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.16.0",

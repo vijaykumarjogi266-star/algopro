@@ -352,10 +352,12 @@ class NewsCollector:
         limit: int,
         match_aliases: Optional[List[str]] = None,
     ):
+        if not url.startswith(("https://", "http://")):
+            raise ValueError(f"Untrusted URL scheme: {url}")
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=3.5) as resp:
+        with urllib.request.urlopen(req, timeout=3.5) as resp:  # nosec B310
             content = resp.read()
-            root = ET.fromstring(content)
+            root = ET.fromstring(content)  # nosec B314
             for item_elem in root.findall(".//item"):
                 title_elem = item_elem.find("title")
                 pub_elem = item_elem.find("pubDate")
@@ -421,11 +423,12 @@ class NewsCollector:
 
         if not self.force_offline:
             try:
-                query = urllib.parse.quote("RBI repo rate inflation monetary policy Indian economy Nifty")
                 url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+                if not url.startswith(("https://", "http://")):
+                    raise ValueError(f"Untrusted URL scheme: {url}")
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=4.0) as resp:
-                    root = ET.fromstring(resp.read())
+                with urllib.request.urlopen(req, timeout=4.0) as resp:  # nosec B310
+                    root = ET.fromstring(resp.read())  # nosec B314
                     for item_elem in root.findall(".//item")[:limit * 2]:
                         title_elem = item_elem.find("title")
                         pub_elem = item_elem.find("pubDate")

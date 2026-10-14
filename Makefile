@@ -16,9 +16,9 @@ help:
 	@echo "  make release-check   - Run complete release gate verification"
 
 install:
-	pip install -r requirements.txt
+	pip install -r requirements.lock
 	@if command -v npm >/dev/null 2>&1; then \
-		npm --prefix apps/web ci || npm --prefix apps/web install --prefer-offline --no-audit --no-fund; \
+		npm --prefix apps/web ci; \
 	fi
 
 import-check:
@@ -48,11 +48,13 @@ test:
 test-security:
 	python3 -m pytest \
 		tests/integration/test_security_configuration.py \
-		tests/integration/test_authorization.py \
+		tests/integration/test_authorization_enforcement.py \
 		tests/integration/test_credential_error_redaction.py \
 		tests/unit/test_circuit_breaker_state_integrity.py \
 		tests/unit/test_circuit_breaker_persistence_failures.py \
 		tests/unit/test_credential_failure_modes.py \
+		tests/unit/test_batch_f_config_and_breaker.py \
+		tests/unit/test_news_fundamental_safety.py \
 		tests/integration/test_actual_ledger_reconciliation.py \
 		tests/integration/test_backup_failure_modes.py \
 		tests/integration/test_protective_cutoff_failure_modes.py \
@@ -60,6 +62,9 @@ test-security:
 
 test-browser:
 	python3 -m pytest tests/browser/ -v
+	@if [ -f apps/web/package.json ] && command -v npm >/dev/null 2>&1; then \
+		npm --prefix apps/web run test:ci; \
+	fi
 
 build: compile
 	@if [ -d apps/web/node_modules ]; then \

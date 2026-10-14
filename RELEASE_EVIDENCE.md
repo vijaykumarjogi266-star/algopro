@@ -73,10 +73,34 @@
 | **G10** | Configurable portable persistence paths (no hardcoded developer paths) | `services/market-intelligence/` modules | `tests/unit/test_news_fundamental_safety.py::test_g10_configurable_portable_persistence_paths` | **PASS** | Batch G |
 | **G11** | Timeout bounding and exception containment on outbound feed requests | `services/market-intelligence/collector_service.py` | `tests/unit/test_news_fundamental_safety.py::test_g11_timeout_bounding_on_outbound_feeds` | **PASS** | Batch G |
 | **G12** | End-to-end decision integrity and audit immutability | `services/market-intelligence/stock_decision_engine.py` | `tests/unit/test_news_fundamental_safety.py::test_g12_end_to_end_decision_integrity_and_audit_immutability` | **PASS** | Batch G |
-| **H01-H08** | Portable lock verification, all-layer canary scan, CI gate | `scripts/verify_release.sh`, Makefile | `tests/unit/test_release_gate_behavior.py`, `test_image_canary_layers.py` | PENDING | Batch H |
+| **H01** | Missing required tool causes nonzero exit code and BLOCKED report | `scripts/verify_release.sh` | `tests/unit/test_batch_h_release_gate.py::test_h01_missing_required_tool_causes_nonzero_blocked` | **PASS** | Batch H |
+| **H02** | Any failure in lint/typecheck/test/build/scan propagates non-zero exit | `scripts/verify_release.sh` | `tests/unit/test_batch_h_release_gate.py::test_h02_lint_type_test_build_scan_failure_causes_nonzero` | **PASS** | Batch H |
+| **H03** | npm ci failure cannot fall back to unlocked install | `Makefile`, `scripts/verify_release.sh` | `tests/unit/test_batch_h_release_gate.py::test_h03_npm_ci_failure_cannot_fall_back_to_unlocked_install` | **PASS** | Batch H |
+| **H04** | Required skipped Docker/browser test strictly prevents VERIFIED release status | `scripts/verify_release.sh` | `tests/unit/test_batch_h_release_gate.py::test_h04_required_skipped_docker_browser_test_prevents_verified` | **PASS** | Batch H |
+| **H05** | Real image positive and negative controls run in CI | `tests/deployment/test_image_canary_layers.py` | `tests/unit/test_batch_h_release_gate.py::test_h05_real_image_positive_and_negative_controls` | **PASS** | Batch H |
+| **H06** | All maintained suites execute, including intelligence and browser execution tests | `scripts/verify_release.sh`, `Makefile` | `tests/unit/test_batch_h_release_gate.py::test_h06_all_maintained_suites_execute_including_intelligence` | **PASS** | Batch H |
+| **H07** | Coverage thresholds fail when insufficient (<80% overall, <90% safety modules) | `scripts/verify_release.sh` | `tests/unit/test_batch_h_release_gate.py::test_h07_coverage_thresholds_fail_when_insufficient` | **PASS** | Batch H |
+| **H08** | Lock install and pip dependency consistency pass on clean Python 3.12 | `requirements.lock` | `tests/unit/test_batch_h_release_gate.py::test_h08_lock_install_and_pip_dependency_consistency` | **PASS** | Batch H |
 
 ---
 
 ## Gate Verdict Log
-* **Current Baseline**: Head commit `57c34603506ecf9c28666886cee6bb9027085c29` on branch `feature/remediation-v2-plan`
-* **Test Suite Baseline**: 684 collected tests
+* **Initial Reviewed Commit**: `57c34603506ecf9c28666886cee6bb9027085c29`
+* **Active Remediation Branch**: `feature/remediation-v2-plan`
+* **Batches Implemented & Verified**:
+  - Batch A (Historical Data & Immutable Registry: A01–A08) -> **PASS**
+  - Batch B (Atomic Fills & Canonical Accounting: B01–B12) -> **PASS**
+  - Batch C (Real Strategy Dispatch & Order Provenance: C01–C07) -> **PASS**
+  - Batch D (Accurate Backtest Persistence: D01–D07) -> **PASS**
+  - Batch E (Exchange-Session Cutoff Handling: E01–E08) -> **PASS**
+  - Batch F (Production Config, Secret Discipline & Durable Breaker: F01–F09) -> **PASS**
+  - Batch G (Market-Intelligence Safety, Boundaries & Gate: G01–G12) -> **PASS**
+  - Batch H (Real Tests, Canary Scanner, Locks, Builds & CI Gate: H01–H08) -> **PASS**
+* **Host Environment Release Gate Verdict**:
+  `NOT READY / RELEASE CHECK BLOCKED (2 Mandatory Host-Specific Criteria Blocked)`
+  - Blocked Check 1: Next.js native SWC build (SWC compiler binary not published for ARM64 Android Termux host; enforced in Linux x86_64 CI).
+  - Blocked Check 2: Docker daemon unavailable on Android Termux host (enforced in Linux x86_64 CI).
+  - Fail-closed gate behavior verified: `verify_release.sh` strictly exited `1` upon detecting blocked checks, preventing erroneous VERIFIED claim.
+* **Paper-Only Execution Invariant**:
+  - `LIVE_TRADING_ENABLED = False` permanently locked.
+  - `REAL_BROKER_EXECUTION_ENABLED = False` permanently locked.

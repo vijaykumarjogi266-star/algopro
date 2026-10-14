@@ -59,6 +59,13 @@ python3 -m pytest \
   tests/integration/test_daemon_release_lifecycle.py \
   tests/integration/test_real_fill_multiday_accounting.py \
   tests/integration/test_protective_cutoff_failure_modes.py \
+  tests/unit/test_strategy_dispatch_provenance.py \
+  tests/unit/test_batch_d_accurate_persistence.py \
+  tests/unit/test_batch_e_session_cutoff.py \
+  tests/unit/test_batch_f_config_and_breaker.py \
+  tests/unit/test_news_fundamental_safety.py \
+  tests/unit/test_news_fundamental_agent.py \
+  tests/browser/test_audit_and_error_xss.py \
   tests/unit/test_manifest_freshness_and_replay.py \
   tests/unit/test_release_gate_behavior.py \
   tests/deployment/test_image_canary_layers.py \
