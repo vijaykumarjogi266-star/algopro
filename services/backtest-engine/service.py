@@ -589,13 +589,14 @@ class BacktestService:
                     raw_entry = bar["open"]
                     entry_p, slip_pts = _calculate_slippage_price(raw_entry, "BUY", slip_cfg)
                     if is_buy_and_hold:
-                        if "allocation_pct" in params:
-                            alloc_pct = float(params["allocation_pct"])
-                            weights = params.get("weights", {})
-                            weight = float(weights.get(sym, 1.0 / max(1, len(repro.universe))))
-                            capital_per_trade = repro.initial_capital * alloc_pct * weight
-                        else:
-                            capital_per_trade = (min(cash * 0.045, repro.initial_capital * 0.045)) / max(1, len(repro.universe))
+                        from quant.strategies.buy_and_hold import BuyAndHold
+                        bh_strat = BuyAndHold(parameters={
+                            "allocation_pct": float(params.get("allocation_pct", 1.0)),
+                            "universe": repro.universe,
+                            "weights": params.get("weights", {}),
+                        })
+                        weight = bh_strat.get_allocation_weight(sym)
+                        capital_per_trade = repro.initial_capital * weight
                         stop_loss = round(entry_p * 0.50, 2)
                     else:
                         capital_per_trade = min(cash * 0.045, repro.initial_capital * 0.045)

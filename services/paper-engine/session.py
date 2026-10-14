@@ -501,6 +501,11 @@ class PaperTradingEngine:
         price: float,
         stop_loss: Optional[float] = None,
         target_price: Optional[float] = None,
+        strategy_id: Optional[str] = None,
+        strategy_version: Optional[str] = None,
+        decision_id: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
+        data_provenance: Optional[Dict[str, Any]] = None,
     ) -> Tuple[ExecutionOrder, Optional[ExecutionFill]]:
         """Proposes, risk-evaluates, and executes an order in the session portfolio.
         
@@ -514,6 +519,9 @@ class PaperTradingEngine:
             if session.status != SessionStatus.RUNNING:
                 raise ValueError(f"Cannot submit order to session in state {session.status}")
 
+            strat_id = strategy_id or session.strategy_id
+            strat_ver = strategy_version or session.strategy_version
+
             # 1. Validate against Execution Gateway Circuit Breaker if attached
             if self.circuit_breaker is not None:
                 payload = OrderPayload(
@@ -523,7 +531,7 @@ class PaperTradingEngine:
                     quantity=quantity if side == OrderSide.BUY else -quantity,
                     price=price,
                     timestamp=datetime.now(timezone.utc),
-                    strategy_id=session.strategy_id,
+                    strategy_id=strat_id,
                 )
                 self.circuit_breaker.validate_order(payload)
 
@@ -535,6 +543,11 @@ class PaperTradingEngine:
                 price=price,
                 stop_loss=stop_loss,
                 target_price=target_price,
+                strategy_id=strat_id,
+                strategy_version=strat_ver,
+                decision_id=decision_id,
+                parameters=parameters,
+                data_provenance=data_provenance,
             )
 
             # 3. Risk check against session portfolio metrics & cash solvency & holdings

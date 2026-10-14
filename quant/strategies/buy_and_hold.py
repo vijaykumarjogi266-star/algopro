@@ -93,7 +93,35 @@ class BuyAndHold(BaseStrategy):
                 evidence={"bar_index": 0, "weight": weight, "allocation_pct": self.allocation_pct},
                 stop_loss=round(current_bar.close * 0.90, 2),
             )
-        return self.default_wait(sym, ts, "Buy and Hold in hold state")
+    def evaluate_data(
+        self,
+        symbol: str,
+        data: Dict[str, Any],
+        parameters: Optional[Dict[str, Any]] = None,
+    ) -> StrategyDecision:
+        from datetime import datetime, timezone
+        ts = data.get("bar_timestamp") or datetime.now(timezone.utc)
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except Exception:
+                ts = datetime.now(timezone.utc)
+        price = float(data.get("price", 0.0))
+        if not self.has_entered.get(symbol, False):
+            self.has_entered[symbol] = True
+            weight = self.get_allocation_weight(symbol)
+            return StrategyDecision(
+                symbol=symbol,
+                decision_timestamp=ts,
+                signal=SignalType.BUY,
+                confidence=1.0,
+                reason="Buy and Hold entry",
+                evidence={"weight": weight, "allocation_pct": self.allocation_pct},
+                stop_loss=round(price * 0.90, 2),
+                position_sizing_ratio=weight,
+            )
+        return self.default_wait(symbol, ts, "Buy and Hold in hold state")
+
 
     def execute_allocation_with_risk_policy(
         self,

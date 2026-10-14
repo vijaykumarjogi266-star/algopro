@@ -301,6 +301,22 @@ class AutonomousSentinel:
                 logger.warning(f"Manifest {latest_file} strategy is WAIT or missing. Emitting WAIT.")
                 return safe_fallback
 
+            # Validate strategy is registered in StrategyRegistry (Unknown strategy yields WAIT)
+            from quant.strategies.registry import StrategyRegistry
+            if not StrategyRegistry.is_registered(strat):
+                logger.warning(f"Manifest {latest_file} strategy '{strat}' unknown to StrategyRegistry. Emitting WAIT.")
+                return safe_fallback
+
+            # Validate parameters
+            params = data.get("parameters", {})
+            if not isinstance(params, dict):
+                logger.warning(f"Manifest {latest_file} parameters is not a dict. Emitting WAIT.")
+                return safe_fallback
+            is_valid_params, p_err = StrategyRegistry.validate_parameters(strat, params)
+            if not is_valid_params:
+                logger.warning(f"Manifest {latest_file} invalid parameters: {p_err}. Emitting WAIT.")
+                return safe_fallback
+
             # Validate risk_multiplier is finite, non-negative, and bounded
             risk_mult = data.get("risk_multiplier")
             if not isinstance(risk_mult, (int, float)) or not math.isfinite(risk_mult) or risk_mult < 0:

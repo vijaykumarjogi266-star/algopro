@@ -53,6 +53,12 @@ class ExecutionOrder(BaseModel):
     rejection_code: Optional[str] = None
     rejection_reason: Optional[str] = None
 
+    strategy_id: Optional[str] = None
+    strategy_version: Optional[str] = None
+    decision_id: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+    data_provenance: Optional[Dict[str, Any]] = None
+
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     state_history: List[Dict[str, Any]] = Field(default_factory=list)
@@ -88,6 +94,10 @@ class ExecutionFill(BaseModel):
     net_traded_value: float
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     fee_breakdown: Dict[str, float] = Field(default_factory=dict)
+    strategy_id: Optional[str] = None
+    strategy_version: Optional[str] = None
+    decision_id: Optional[str] = None
+    data_provenance: Optional[Dict[str, Any]] = None
 
 
 class ExecutionLifecycleManager:
@@ -114,8 +124,13 @@ class ExecutionLifecycleManager:
         target_price: Optional[float] = None,
         limit_price: Optional[float] = None,
         candidate_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+        strategy_version: Optional[str] = None,
+        decision_id: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
+        data_provenance: Optional[Dict[str, Any]] = None,
     ) -> ExecutionOrder:
-        """Step 1: Creates an initial order in ORDER_PROPOSED state."""
+        """Step 1: Creates an initial order in ORDER_PROPOSED state with provenance."""
         order = ExecutionOrder(
             symbol=symbol.upper(),
             side=side,
@@ -126,12 +141,20 @@ class ExecutionLifecycleManager:
             stop_loss=stop_loss,
             target_price=target_price,
             candidate_id=candidate_id or str(uuid.uuid4()),
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            decision_id=decision_id,
+            parameters=parameters,
+            data_provenance=data_provenance,
         )
         order.state_history.append({
             "from_state": None,
             "to_state": OrderLifecycleState.ORDER_PROPOSED.value,
             "timestamp": order.created_at.isoformat(),
             "reason": "Initial order proposal",
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "decision_id": decision_id,
         })
         return order
 
@@ -320,6 +343,10 @@ class ExecutionLifecycleManager:
             transaction_costs=costs,
             net_traded_value=net_traded_value,
             fee_breakdown={"total_costs": costs},
+            strategy_id=order.strategy_id,
+            strategy_version=order.strategy_version,
+            decision_id=order.decision_id,
+            data_provenance=order.data_provenance,
         )
 
         order.transition_to(

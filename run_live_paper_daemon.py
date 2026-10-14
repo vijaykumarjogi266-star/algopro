@@ -104,6 +104,18 @@ def validate_manifest(
     if not strat or strat == "WAIT":
         return False, f"Strategy is WAIT or empty: {strat}"
 
+    from quant.strategies.registry import StrategyRegistry
+    if not StrategyRegistry.is_registered(strat):
+        return False, f"Unknown strategy '{strat}' not registered in StrategyRegistry"
+
+    params = manifest.get("parameters")
+    if params is not None:
+        if not isinstance(params, dict):
+            return False, "Manifest parameters must be a dictionary"
+        is_p_valid, p_err = StrategyRegistry.validate_parameters(strat, params)
+        if not is_p_valid:
+            return False, f"Invalid strategy parameters: {p_err}"
+
     rm = manifest.get("risk_multiplier")
     if not isinstance(rm, (int, float)) or not math.isfinite(rm) or rm <= 0:
         return False, f"Invalid risk multiplier: {rm}"
@@ -948,32 +960,64 @@ class DaemonController:
 
         # STEP 7: Process BUY signals driven by selected strategy and parameters
         if is_manifest_valid and not self.sentinel.is_killswitch_tripped and not self.is_halted:
-            selected_strat = manifest.get("selected_strategy", "strat_daemon_5x")
+            selected_strat = manifest.get("selected_strategy")
             params = manifest.get("parameters", {}) if isinstance(manifest.get("parameters"), dict) else {}
             risk_mult = float(manifest.get("risk_multiplier", 1.0))
             sl_atr_mult = float(params.get("stop_loss_atr", 1.5))
             tp_atr_mult = float(params.get("target_atr", 3.0))
 
+            from quant.strategies.registry import StrategyRegistry
+            strategy = StrategyRegistry.get_strategy(selected_strat, params)
+
             for sym, data in results.items():
-                if data.get("status") != "OK" or data.get("signal") != "BUY":
+                if data.get("status") != "OK":
                     continue
+
+                # Dispatch symbol evaluation to selected strategy implementation
+                # (No generic scanner fallback; unknown strategy yields WAIT)
+                strat_decision = StrategyRegistry.dispatch_symbol(
+                    strategy_or_name=strategy,
+                    symbol=sym,
+                    market_data=data,
+                    parameters=params,
+                )
+
+                if strat_decision.get("signal") != "BUY":
+                    continue
+
                 sym_key = sym.upper()
-                price = data["price"]
+                price = float(strat_decision.get("price", data.get("price", 0.0)))
+                atr_val = float(data.get("atr", price * 0.01))
+
+                # Stop loss & target derived strictly from validated parameters and strategy decision
+                effective_stop_loss = strat_decision.get("stop_loss")
+                if effective_stop_loss is None:
+                    effective_stop_loss = round(price - (sl_atr_mult * atr_val), 2)
+
+                effective_target = strat_decision.get("target")
+                if effective_target is None:
+                    effective_target = round(price + (tp_atr_mult * atr_val), 2)
 
                 if len(self.session.portfolio.positions) >= self.risk_limits.max_open_positions:
                     continue
 
                 risk_per_trade = self.initial_capital * 0.05 * risk_mult
-                stop_dist = max(price - data.get("stop_loss", price * 0.98), data.get("atr", price * 0.01) * sl_atr_mult)
+                stop_dist = max(price - effective_stop_loss, atr_val * sl_atr_mult)
                 shares = int(risk_per_trade / stop_dist) if stop_dist > 0 else 1
-                max_shares = int((min(current_equity, self.buying_power) * 0.19) / price)
+                max_cap_pct = getattr(self.risk_limits, "max_capital_per_trade_pct", 0.20)
+                max_shares = int((min(current_equity, self.buying_power) * max_cap_pct) / price)
                 shares = max(1, min(shares, max_shares))
+
+                # AI/intelligence may downsize/veto, but NEVER override independent risk limits (C07)
+                ai_intel = data.get("market_intelligence") or data.get("ai_context") or {}
+                if isinstance(ai_intel, dict) and ai_intel.get("veto_entry", False):
+                    continue
 
                 eval_res = self.risk_engine.evaluate(
                     symbol=sym,
                     price=price,
                     proposed_quantity=shares,
-                    stop_loss=data.get("stop_loss"),
+                    stop_loss=effective_stop_loss,
                     current_portfolio_value=current_equity,
                     current_daily_loss_pct=risk_state["daily_loss_pct"],
                     current_drawdown_pct=risk_state["drawdown_pct"],
@@ -982,19 +1026,35 @@ class DaemonController:
                 )
 
                 if eval_res.is_approved:
+                    final_qty = eval_res.approved_quantity
+                    if isinstance(ai_intel, dict) and "suggested_quantity" in ai_intel:
+                        ai_suggested = int(ai_intel["suggested_quantity"])
+                        final_qty = min(final_qty, max(1, ai_suggested))
+
+                    data_prov = {
+                        "dataset_id": manifest.get("dataset_id"),
+                        "dataset_checksum": manifest.get("dataset_checksum"),
+                        "code_version": manifest.get("code_version"),
+                    }
                     order, fill = self.paper_engine.submit_manual_order(
                         session_id=self.session.session_id,
                         symbol=sym,
                         side=OrderSide.BUY,
-                        quantity=eval_res.approved_quantity,
+                        quantity=final_qty,
                         price=price,
-                        stop_loss=data.get("stop_loss"),
+                        stop_loss=effective_stop_loss,
+                        target_price=effective_target,
+                        strategy_id=selected_strat,
+                        strategy_version=strategy.version if strategy else "1.0.0",
+                        decision_id=dec_id,
+                        parameters=params,
+                        data_provenance=data_prov,
                     )
                     self.session = self.paper_engine.get_session(self.session.session_id)
                     if fill:
                         self.session.strategy_id = selected_strat
-                        self.trade_stops[sym_key] = data.get("stop_loss")
-                        self.trade_targets[sym_key] = data.get("target")
+                        self.trade_stops[sym_key] = effective_stop_loss
+                        self.trade_targets[sym_key] = effective_target
                         self.trade_entry_times[sym_key] = ist_now
                         if dec_id:
                             self.processed_decision_ids.add(dec_id)
