@@ -37,6 +37,10 @@ from services.market_intelligence.collector_service import (
 
 logger = logging.getLogger("MarketIntelligenceAssistant")
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DEFAULT_DB_PATH = os.path.join(PROJECT_ROOT, "data", "market_intelligence.db")
+DEFAULT_INTELLIGENCE_DIR = os.path.join(PROJECT_ROOT, "data", "intelligence")
+
 
 class MarketIntelligenceAssistant:
     """
@@ -48,15 +52,17 @@ class MarketIntelligenceAssistant:
 
     def __init__(
         self,
-        db_path: str = "/home/ubuntu/algopro/data/market_intelligence.db",
-        intelligence_dir: str = "/home/ubuntu/algopro/data/intelligence",
+        db_path: Optional[str] = None,
+        intelligence_dir: Optional[str] = None,
         schedule_config: Optional[CollectionScheduleConfig] = None,
         force_offline: bool = False,
+        allow_synthetic_fallback: bool = True,
     ):
-        self.db_path = db_path
-        self.intelligence_dir = intelligence_dir
+        self.db_path = db_path or DEFAULT_DB_PATH
+        self.intelligence_dir = intelligence_dir or DEFAULT_INTELLIGENCE_DIR
         self.config = schedule_config or CollectionScheduleConfig()
         self.force_offline = force_offline
+        self.allow_synthetic_fallback = allow_synthetic_fallback
 
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         os.makedirs(self.intelligence_dir, exist_ok=True)
@@ -65,6 +71,7 @@ class MarketIntelligenceAssistant:
             db_path=self.db_path,
             intelligence_dir=self.intelligence_dir,
             force_offline=self.force_offline,
+            allow_synthetic_fallback=self.allow_synthetic_fallback,
         )
         self.news_collector = self.agent.news_collector
         self.fundamental_collector = self.agent.fundamental_collector

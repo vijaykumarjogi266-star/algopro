@@ -4,10 +4,16 @@ Defines immutable point-in-time schemas for news items, fundamental metrics,
 sentiment evaluations, and quantamental decision manifests.
 """
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from enum import Enum
 from typing import Dict, Any, List, Optional
+
+
+class DataUnavailableError(Exception):
+    """Raised when real market intelligence data is unavailable and synthetic fallback is prohibited."""
+    pass
 
 
 class SentimentLabel(str, Enum):
@@ -66,6 +72,14 @@ class NewsItem:
     confidence: float = 0.5              # Confidence score [0.0, 1.0]
     urgency: NewsUrgency = NewsUrgency.LOW
     category: NewsCategory = NewsCategory.GENERAL
+    is_synthetic_fixture: bool = False
+    provenance: str = "LIVE_RSS"
+
+    def __post_init__(self):
+        if not math.isfinite(self.sentiment_score):
+            raise ValueError(f"sentiment_score must be a finite float, got {self.sentiment_score}")
+        if not math.isfinite(self.confidence):
+            raise ValueError(f"confidence must be a finite float, got {self.confidence}")
 
     def is_eligible_at(self, simulation_time: datetime) -> bool:
         """Enforces point-in-time availability rule: T_pub <= t_sim."""
@@ -92,6 +106,22 @@ class FundamentalSnapshot:
     piotroski_f_score: int               # Score between 0 and 9
     health_tier: HealthTier = HealthTier.AVERAGE
     red_flags: List[str] = field(default_factory=list)
+    is_synthetic_fixture: bool = False
+    provenance: str = "REAL_PROVIDER"
+
+    def __post_init__(self):
+        if not math.isfinite(self.market_cap) or self.market_cap < 0:
+            raise ValueError(f"market_cap must be a non-negative finite float, got {self.market_cap}")
+        for field_name in (
+            "pe_ratio", "pb_ratio", "ev_to_ebitda", "debt_to_equity",
+            "roe", "roce", "operating_margin", "net_margin",
+            "revenue_growth_yoy", "eps_growth_yoy", "free_cash_flow",
+        ):
+            val = getattr(self, field_name)
+            if val is not None and not math.isfinite(val):
+                raise ValueError(f"{field_name} must be a finite number if provided, got {val}")
+        if not isinstance(self.piotroski_f_score, int) or not (0 <= self.piotroski_f_score <= 9):
+            raise ValueError(f"piotroski_f_score must be an integer between 0 and 9, got {self.piotroski_f_score}")
 
     @property
     def is_disqualified(self) -> bool:
@@ -100,6 +130,9 @@ class FundamentalSnapshot:
             "EXTREME_DEBT_BURDEN" in self.red_flags
             or "CHRONIC_NEGATIVE_EARNINGS" in self.red_flags
             or "SEVERE_REVENUE_CONTRACTION" in self.red_flags
+            or "NON_FINITE_RATIOS" in self.red_flags
+            or "REGULATORY_SCANDAL" in self.red_flags
+            or "AUDITOR_RESIGNATION" in self.red_flags
         )
 
 

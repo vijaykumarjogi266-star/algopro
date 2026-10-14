@@ -5,10 +5,13 @@ lookahead protection, robust error handling, caching, and deterministic offline 
 """
 
 import hashlib
+import html
 import json
 import logging
+import math
 import os
 import re
+import unicodedata
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -27,10 +30,34 @@ from services.market_intelligence.news_fundamental_contracts import (
     MacroNewsItem,
     CorporateCalendarEvent,
     AnalystConsensus,
+    DataUnavailableError,
 )
 from services.market_intelligence.sentiment_engine import FinancialSentimentAnalyzer
 
 logger = logging.getLogger("NewsFundamentalCollector")
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DEFAULT_INTELLIGENCE_DIR = os.path.join(PROJECT_ROOT, "data", "intelligence")
+DEFAULT_CACHE_DIR = os.path.join(DEFAULT_INTELLIGENCE_DIR, "cache")
+
+
+def sanitize_untrusted_text(text: Optional[str], max_len: int = 500) -> str:
+    """Sanitize external provider text against HTML injection, control chars, and prompt injection (G03)."""
+    if not text:
+        return ""
+    # 1. Unescape HTML entities
+    s = html.unescape(str(text))
+    # 2. Strip HTML tags
+    s = re.sub(r"<[^>]+>", " ", s)
+    # 3. Normalize unicode
+    s = unicodedata.normalize("NFKC", s)
+    # 4. Remove control characters except standard space/tab/newline
+    s = "".join(c for c in s if c in ("\n", "\r", "\t") or unicodedata.category(c)[0] != "C")
+    # 5. Collapse excessive whitespace
+    s = re.sub(r"[ \t]+", " ", s).strip()
+    # 6. Neutralize prompt injection markers
+    s = re.sub(r"(?i)\b(system|assistant|instruction):", r"[\1]", s)
+    return s[:max_len]
 
 # Deterministic fundamental baseline fixtures for core NSE universe
 BENCHMARK_FUNDAMENTAL_FIXTURES: Dict[str, Dict[str, Any]] = {
@@ -236,11 +263,13 @@ class NewsCollector:
         self,
         sentiment_analyzer: Optional[FinancialSentimentAnalyzer] = None,
         force_offline: bool = False,
-        cache_dir: str = "/home/ubuntu/algopro/data/intelligence/cache",
+        allow_synthetic_fallback: bool = True,
+        cache_dir: Optional[str] = None,
     ):
         self.sentiment_analyzer = sentiment_analyzer or FinancialSentimentAnalyzer()
         self.force_offline = force_offline
-        self.cache_dir = cache_dir
+        self.allow_synthetic_fallback = allow_synthetic_fallback
+        self.cache_dir = cache_dir or DEFAULT_CACHE_DIR
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def fetch_symbol_news(
@@ -262,9 +291,17 @@ class NewsCollector:
             try:
                 items = self._fetch_live_rss(symbol, sym_clean, limit, ref_time)
             except Exception as e:
-                logger.warning(f"Live news fetch failed for {symbol}: {e}. Engaging offline fallback.")
+                logger.warning(f"Live news fetch failed for {symbol}: {e}.")
+                if not self.allow_synthetic_fallback:
+                    raise DataUnavailableError(
+                        f"Live news fetch failed for {symbol} and synthetic fallback is disallowed: {e}"
+                    ) from e
 
         if not items:
+            if not self.force_offline and not self.allow_synthetic_fallback:
+                raise DataUnavailableError(
+                    f"No live news items found for {symbol} and synthetic fallback is disallowed."
+                )
             items = self._fetch_offline_fixtures(symbol, sym_clean, ref_time)
 
         # Enforce point-in-time lookahead safety (INV-26)
@@ -287,7 +324,10 @@ class NewsCollector:
         # 1. Primary Source: Targeted Google News search for symbol
         query = urllib.parse.quote(f"{sym_clean} share price NSE")
         url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
-        self._scrape_feed(url, "Google News (India)", symbol, ref_time, items, seen_titles, limit, match_aliases=None)
+        try:
+            self._scrape_feed(url, "Google News (India)", symbol, ref_time, items, seen_titles, limit, match_aliases=None)
+        except Exception as e:
+            logger.debug(f"Feed error on Google News: {e}")
 
         # 2. Secondary Sources: Financial Press Feeds (Economic Times, Moneycontrol, LiveMint)
         if len(items) < limit:
@@ -325,7 +365,9 @@ class NewsCollector:
                 if title_elem is None or title_elem.text is None:
                     continue
 
-                title = title_elem.text.strip()
+                title = sanitize_untrusted_text(title_elem.text)
+                if not title:
+                    continue
                 t_lower = title.lower()
 
                 # If alias filtering is active, only include headlines mentioning the company
@@ -336,8 +378,8 @@ class NewsCollector:
                     continue
                 seen_titles.add(t_lower)
 
-                link = link_elem.text.strip() if link_elem is not None and link_elem.text else None
-                source = source_elem.text.strip() if source_elem is not None and source_elem.text else source_label
+                link = sanitize_untrusted_text(link_elem.text.strip()) if link_elem is not None and link_elem.text else None
+                source = sanitize_untrusted_text(source_elem.text.strip()) if source_elem is not None and source_elem.text else source_label
 
                 pub_dt = self._parse_pub_date(pub_elem.text if pub_elem is not None else None, ref_time)
                 if pub_dt > ref_time:
@@ -360,6 +402,8 @@ class NewsCollector:
                     confidence=conf,
                     urgency=urg,
                     category=cat,
+                    is_synthetic_fixture=False,
+                    provenance="LIVE_RSS",
                 ))
 
                 if len(items) >= limit:
@@ -481,6 +525,8 @@ class NewsCollector:
                 confidence=conf,
                 urgency=urg,
                 category=cat,
+                is_synthetic_fixture=True,
+                provenance="OFFLINE_FIXTURE",
             ))
 
         return items
@@ -500,8 +546,13 @@ class NewsCollector:
 class FundamentalCollector:
     """Ingests and calculates fundamental metrics for equities."""
 
-    def __init__(self, force_offline: bool = False):
+    def __init__(
+        self,
+        force_offline: bool = False,
+        allow_synthetic_fallback: bool = True,
+    ):
         self.force_offline = force_offline
+        self.allow_synthetic_fallback = allow_synthetic_fallback
 
     def fetch_fundamental_snapshot(
         self,
@@ -510,26 +561,42 @@ class FundamentalCollector:
     ) -> FundamentalSnapshot:
         """
         Fetches fundamental snapshot for a symbol.
-        Leverages yfinance when online, falling back seamlessly to institutional fixtures.
+        Leverages yfinance when online, falling back seamlessly to institutional fixtures when permitted.
         """
         eval_date = as_of_date or date.today()
         fixture = BENCHMARK_FUNDAMENTAL_FIXTURES.get(symbol)
 
-        if self.force_offline or fixture is None:
+        if self.force_offline:
             if fixture:
                 return self._create_snapshot_from_fixture(symbol, eval_date, fixture)
+            if not self.allow_synthetic_fallback:
+                raise DataUnavailableError(f"No benchmark fundamental fixture for {symbol} in offline mode.")
 
         # Try live yfinance fetch
-        try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            if info and len(info) > 10:
-                return self._create_snapshot_from_yfinance(symbol, eval_date, info, fixture)
-        except Exception as e:
-            logger.warning(f"Live fundamental fetch for {symbol} failed: {e}. Using benchmark fixture.")
+        if not self.force_offline:
+            try:
+                ticker = yf.Ticker(symbol)
+                info = ticker.info
+                if info and len(info) > 10:
+                    return self._create_snapshot_from_yfinance(symbol, eval_date, info, fixture)
+            except Exception as e:
+                logger.warning(f"Live fundamental fetch for {symbol} failed: {e}.")
+                if not self.allow_synthetic_fallback:
+                    raise DataUnavailableError(
+                        f"Live fundamental fetch failed for {symbol} and synthetic fallback is disallowed: {e}"
+                    ) from e
 
         if fixture:
+            if not self.force_offline and not self.allow_synthetic_fallback:
+                raise DataUnavailableError(
+                    f"Live fundamental fetch returned no data for {symbol} and synthetic fallback is disallowed."
+                )
             return self._create_snapshot_from_fixture(symbol, eval_date, fixture)
+
+        if not self.allow_synthetic_fallback:
+            raise DataUnavailableError(
+                f"No fundamental data available for unknown symbol {symbol} and synthetic fallback is disallowed."
+            )
 
         # Default fallback if unknown symbol and offline
         return FundamentalSnapshot(
@@ -550,6 +617,8 @@ class FundamentalCollector:
             piotroski_f_score=5,
             health_tier=HealthTier.AVERAGE,
             red_flags=[],
+            is_synthetic_fixture=True,
+            provenance="SYNTHETIC_FALLBACK",
         )
 
     def _create_snapshot_from_yfinance(
@@ -559,19 +628,30 @@ class FundamentalCollector:
         info: Dict[str, Any],
         fixture: Optional[Dict[str, Any]],
     ) -> FundamentalSnapshot:
-        pe = info.get("trailingPE") or (fixture.get("pe_ratio") if fixture else None)
-        pb = info.get("priceToBook") or (fixture.get("pb_ratio") if fixture else None)
-        de = info.get("debtToEquity")
-        if de is not None:
-            de = de / 100.0 if de > 5.0 else de  # Convert percentage to ratio if needed
+        def _safe_float(val: Any) -> Optional[float]:
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                return f if math.isfinite(f) else None
+            except (ValueError, TypeError):
+                return None
+
+        pe = _safe_float(info.get("trailingPE")) or (fixture.get("pe_ratio") if fixture else None)
+        pb = _safe_float(info.get("priceToBook")) or (fixture.get("pb_ratio") if fixture else None)
+        de_raw = _safe_float(info.get("debtToEquity"))
+        if de_raw is not None:
+            de = de_raw / 100.0 if de_raw > 5.0 else de_raw
         elif fixture:
             de = fixture.get("debt_to_equity")
+        else:
+            de = None
 
-        roe = info.get("returnOnEquity") or (fixture.get("roe") if fixture else 0.12)
-        op_margin = info.get("operatingMargins") or (fixture.get("operating_margin") if fixture else 0.15)
-        net_margin = info.get("profitMargins") or (fixture.get("net_margin") if fixture else 0.10)
-        rev_growth = info.get("revenueGrowth") or (fixture.get("revenue_growth_yoy") if fixture else 0.08)
-        mcap = info.get("marketCap") or (fixture.get("market_cap") if fixture else 100000000000.0)
+        roe = _safe_float(info.get("returnOnEquity")) or (fixture.get("roe") if fixture else 0.12)
+        op_margin = _safe_float(info.get("operatingMargins")) or (fixture.get("operating_margin") if fixture else 0.15)
+        net_margin = _safe_float(info.get("profitMargins")) or (fixture.get("net_margin") if fixture else 0.10)
+        rev_growth = _safe_float(info.get("revenueGrowth")) or (fixture.get("revenue_growth_yoy") if fixture else 0.08)
+        mcap = _safe_float(info.get("marketCap")) or (fixture.get("market_cap") if fixture else 100000000000.0)
 
         red_flags: List[str] = []
         is_bank = "BANK" in symbol.upper() or "FIN" in symbol.upper()
@@ -587,21 +667,23 @@ class FundamentalCollector:
         return FundamentalSnapshot(
             symbol=symbol,
             as_of_date=eval_date,
-            market_cap=float(mcap),
-            pe_ratio=float(pe) if pe else None,
-            pb_ratio=float(pb) if pb else None,
-            ev_to_ebitda=float(info.get("enterpriseToEbitda")) if info.get("enterpriseToEbitda") else (fixture.get("ev_to_ebitda") if fixture else None),
-            debt_to_equity=float(de) if de is not None else None,
-            roe=float(roe) if roe else None,
+            market_cap=float(mcap) if mcap else 100000000000.0,
+            pe_ratio=pe,
+            pb_ratio=pb,
+            ev_to_ebitda=_safe_float(info.get("enterpriseToEbitda")) or (fixture.get("ev_to_ebitda") if fixture else None),
+            debt_to_equity=de,
+            roe=roe,
             roce=fixture.get("roce") if fixture else (float(roe) * 1.1 if roe else None),
-            operating_margin=float(op_margin) if op_margin else None,
-            net_margin=float(net_margin) if net_margin else None,
-            revenue_growth_yoy=float(rev_growth) if rev_growth else None,
+            operating_margin=op_margin,
+            net_margin=net_margin,
+            revenue_growth_yoy=rev_growth,
             eps_growth_yoy=fixture.get("eps_growth_yoy", 0.08) if fixture else None,
-            free_cash_flow=float(info.get("freeCashflow")) if info.get("freeCashflow") else (fixture.get("free_cash_flow") if fixture else None),
+            free_cash_flow=_safe_float(info.get("freeCashflow")) or (fixture.get("free_cash_flow") if fixture else None),
             piotroski_f_score=f_score,
             health_tier=fixture.get("health_tier", HealthTier.SOUND) if fixture else HealthTier.SOUND,
             red_flags=red_flags,
+            is_synthetic_fixture=False,
+            provenance="LIVE_YFINANCE",
         )
 
     def _create_snapshot_from_fixture(
@@ -628,6 +710,8 @@ class FundamentalCollector:
             piotroski_f_score=fix["piotroski_f_score"],
             health_tier=fix["health_tier"],
             red_flags=list(fix["red_flags"]),
+            is_synthetic_fixture=True,
+            provenance="BENCHMARK_FIXTURE",
         )
 
     def fetch_corporate_calendar(self, symbol: str) -> List[CorporateCalendarEvent]:
@@ -675,15 +759,21 @@ class FundamentalCollector:
             num_analysts = info.get("numberOfAnalystOpinions")
 
             upside = None
-            if target_mean and current_price and current_price > 0:
-                upside = round(((target_mean - current_price) / current_price) * 100.0, 1)
+            if (
+                target_mean is not None
+                and current_price is not None
+                and float(current_price) > 0
+                and math.isfinite(float(target_mean))
+                and math.isfinite(float(current_price))
+            ):
+                upside = round(((float(target_mean) - float(current_price)) / float(current_price)) * 100.0, 1)
 
             return AnalystConsensus(
                 symbol=symbol,
-                target_mean=float(target_mean) if target_mean else None,
-                target_high=float(target_high) if target_high else None,
-                target_low=float(target_low) if target_low else None,
-                current_price=float(current_price) if current_price else None,
+                target_mean=float(target_mean) if target_mean and math.isfinite(float(target_mean)) else None,
+                target_high=float(target_high) if target_high and math.isfinite(float(target_high)) else None,
+                target_low=float(target_low) if target_low and math.isfinite(float(target_low)) else None,
+                current_price=float(current_price) if current_price and math.isfinite(float(current_price)) else None,
                 upside_potential_pct=upside,
                 recommendation_key=str(rec_key),
                 number_of_analysts=int(num_analysts) if num_analysts else None,

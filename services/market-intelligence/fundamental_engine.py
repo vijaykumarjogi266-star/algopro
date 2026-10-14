@@ -4,6 +4,7 @@ Evaluates profitability, solvency, valuation multiples, and Piotroski F-Scores,
 detecting disqualifying red flags to enforce capital preservation.
 """
 
+import math
 from typing import Dict, Any, List, Tuple, Optional
 from services.market_intelligence.news_fundamental_contracts import (
     FundamentalSnapshot,
@@ -25,6 +26,18 @@ class FundamentalAnalyzer:
         """
         catalysts: List[str] = []
         risks: List[str] = list(snapshot.red_flags)
+
+        # Pre-check: Reject non-finite metrics defensively (G04, G05)
+        for ratio_name, ratio_val in [
+            ("ROE", snapshot.roe),
+            ("Operating Margin", snapshot.operating_margin),
+            ("Debt to Equity", snapshot.debt_to_equity),
+            ("Revenue Growth", snapshot.revenue_growth_yoy),
+            ("P/E Ratio", snapshot.pe_ratio),
+        ]:
+            if ratio_val is not None and not math.isfinite(ratio_val):
+                risks.append(f"Non-finite ratio detected for {ratio_name}: {ratio_val}")
+                return 0.0, HealthTier.DISTRESSED, catalysts, risks
 
         # 1. Profitability Score (35 points max)
         prof_score = 0.0
@@ -151,6 +164,14 @@ class FundamentalAnalyzer:
         prev_asset_turnover: float,
     ) -> int:
         """Computes institutional 9-factor Piotroski F-Score."""
+        inputs = (
+            net_income, operating_cash_flow, prev_roa, curr_roa,
+            curr_leverage, prev_leverage, curr_current_ratio, prev_current_ratio,
+            curr_gross_margin, prev_gross_margin, curr_asset_turnover, prev_asset_turnover,
+        )
+        if any(not isinstance(x, (int, float)) or not math.isfinite(x) for x in inputs):
+            return 0
+
         score = 0
         # Profitability
         if net_income > 0: score += 1

@@ -29,6 +29,10 @@ from services.market_intelligence.collector_service import (
 
 logger = logging.getLogger("NewsFundamentalAgent")
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DEFAULT_DB_PATH = os.path.join(PROJECT_ROOT, "data", "market_intelligence.db")
+DEFAULT_INTELLIGENCE_DIR = os.path.join(PROJECT_ROOT, "data", "intelligence")
+
 DEFAULT_UNIVERSE = list(BENCHMARK_FUNDAMENTAL_FIXTURES.keys())
 
 
@@ -41,13 +45,15 @@ class NewsFundamentalAgent:
 
     def __init__(
         self,
-        db_path: str = "/home/ubuntu/algopro/data/market_intelligence.db",
-        intelligence_dir: str = "/home/ubuntu/algopro/data/intelligence",
+        db_path: Optional[str] = None,
+        intelligence_dir: Optional[str] = None,
         force_offline: bool = False,
+        allow_synthetic_fallback: bool = True,
     ):
-        self.db_path = db_path
-        self.intelligence_dir = intelligence_dir
+        self.db_path = db_path or DEFAULT_DB_PATH
+        self.intelligence_dir = intelligence_dir or DEFAULT_INTELLIGENCE_DIR
         self.force_offline = force_offline
+        self.allow_synthetic_fallback = allow_synthetic_fallback
 
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         os.makedirs(self.intelligence_dir, exist_ok=True)
@@ -57,9 +63,12 @@ class NewsFundamentalAgent:
         self.news_collector = NewsCollector(
             sentiment_analyzer=self.sentiment_analyzer,
             force_offline=self.force_offline,
+            allow_synthetic_fallback=self.allow_synthetic_fallback,
+            cache_dir=os.path.join(self.intelligence_dir, "cache"),
         )
         self.fundamental_collector = FundamentalCollector(
             force_offline=self.force_offline,
+            allow_synthetic_fallback=self.allow_synthetic_fallback,
         )
 
         self._init_db()

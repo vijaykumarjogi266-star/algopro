@@ -6,6 +6,7 @@ consensus into disciplined stock selection and real-time trade gating decisions.
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import uuid
@@ -25,6 +26,9 @@ from services.market_intelligence.news_fundamental_contracts import (
 from services.market_intelligence.news_fundamental_agent import NewsFundamentalAgent
 
 logger = logging.getLogger("StockDecisionEngine")
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DEFAULT_DB_PATH = os.path.join(PROJECT_ROOT, "data", "market_intelligence.db")
 
 
 class SelectionTier(str, Enum):
@@ -113,6 +117,12 @@ class TradeDecisionResult:
     reason: str
     red_flag_alert: bool = False
 
+    def __post_init__(self):
+        if not math.isfinite(self.approved_quantity_scale) or not (0.0 <= self.approved_quantity_scale <= 1.0):
+            raise ValueError(f"approved_quantity_scale must be in range [0.0, 1.0], got {self.approved_quantity_scale}")
+        if not math.isfinite(self.conviction_score) or not (0.0 <= self.conviction_score <= 100.0):
+            raise ValueError(f"conviction_score must be in range [0.0, 100.0], got {self.conviction_score}")
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "symbol": self.symbol,
@@ -140,7 +150,7 @@ class StockDecisionEngine:
         db_path: Optional[str] = None,
     ):
         self.agent = agent or NewsFundamentalAgent()
-        self.db_path = db_path or getattr(self.agent, "db_path", "/home/ubuntu/algopro/data/market_intelligence.db")
+        self.db_path = db_path or getattr(self.agent, "db_path", DEFAULT_DB_PATH)
         self.min_selection_score = min_selection_score
         self.max_portfolio_size = max_portfolio_size
 
@@ -598,8 +608,17 @@ class StockDecisionEngine:
         """
         now = datetime.now(timezone.utc)
         news_items = self.agent.news_collector.fetch_symbol_news(symbol, limit=5)
+        # 1. Check breaking news alerts and regulatory scandals
         for item in news_items:
-            if item.urgency == NewsUrgency.HIGH and item.sentiment_score <= -0.75:
+            t_low = item.title.lower()
+            is_scandal = any(
+                kw in t_low for kw in [
+                    "sebi probe", "cbi raid", "ed raid", "accounting fraud",
+                    "auditor resign", "insolvency", "bankruptcy", "default",
+                    "promoter pledge"
+                ]
+            )
+            if (item.urgency == NewsUrgency.HIGH and item.sentiment_score <= -0.75) or is_scandal:
                 res = TradeDecisionResult(
                     symbol=symbol,
                     action=TradeAction.EMERGENCY_EXIT,
@@ -616,6 +635,26 @@ class StockDecisionEngine:
                         evaluated_at=now
                     )
                 return res
+
+        # 2. Check fundamental deterioration / disqualification
+        snap = self.agent.fundamental_collector.fetch_fundamental_snapshot(symbol)
+        if snap.is_disqualified:
+            res = TradeDecisionResult(
+                symbol=symbol,
+                action=TradeAction.EMERGENCY_EXIT,
+                approved_quantity_scale=0.0,
+                conviction_score=0.0,
+                reason=f"EMERGENCY EXIT TRIGGERED: Disqualified by fundamental red flags ({', '.join(snap.red_flags)})",
+                red_flag_alert=True,
+            )
+            if persist:
+                self._persist_trade_decision(
+                    res, decision_type="HOLDING_RISK", proposed_signal="HOLD",
+                    current_price=current_market_price,
+                    context={"entry_price": current_entry_price, "market_price": current_market_price, "red_flags": snap.red_flags},
+                    evaluated_at=now
+                )
+            return res
 
         res = TradeDecisionResult(
             symbol=symbol,
