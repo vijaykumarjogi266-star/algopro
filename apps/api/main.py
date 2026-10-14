@@ -36,6 +36,7 @@ from apps.api.routes.paper_trading import router as paper_trading_router
 from apps.api.routes.brokers import router as brokers_router
 from apps.api.routes.circuit_breaker import router as circuit_breaker_router
 from apps.api.routes.research_ui import router as research_ui_router
+from apps.api.routes.metrics import router as metrics_router
 
 # Initialize structured logging
 setup_logging()
@@ -44,6 +45,7 @@ logger = get_logger("algo_lab.api")
 
 PUBLIC_PATHS = {
     "/",
+    "/metrics",
     "/health",
     "/health/ready",
     "/health/live",
@@ -278,6 +280,7 @@ app.include_router(paper_trading_router, prefix=settings.API_V1_PREFIX)
 app.include_router(brokers_router, prefix=settings.API_V1_PREFIX)
 app.include_router(circuit_breaker_router, prefix=settings.API_V1_PREFIX)
 app.include_router(research_ui_router)
+app.include_router(metrics_router)
 
 
 @app.get("/", summary="Root endpoint")
