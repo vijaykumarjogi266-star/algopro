@@ -1914,49 +1914,59 @@ RESEARCH_UI_HTML = """<!DOCTYPE html>
 """
 
 
+def render_research_ui(request: Optional[Request] = None) -> HTMLResponse:
+    content = RESEARCH_UI_HTML
+    if request:
+        nonce = getattr(request.state, "csp_nonce", None)
+        if nonce:
+            content = content.replace("<style>", f'<style nonce="{nonce}">').replace("<script>", f'<script nonce="{nonce}">')
+    return HTMLResponse(content=content, status_code=200)
+
+
 @router.get("", response_class=HTMLResponse, summary="Research UI Single-Page Application")
-def get_research_ui():
+def get_research_ui(request: Request):
     """Serves the institutional Algo Lab Research UI."""
-    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+    return render_research_ui(request)
 
 
 @router.get("/create", response_class=HTMLResponse, summary="Experiment Designer View")
-def get_create_view():
-    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+def get_create_view(request: Request):
+    return render_research_ui(request)
 
 
 @router.get("/detail", response_class=HTMLResponse, summary="Experiment Detail View")
-def get_detail_view():
-    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+def get_detail_view(request: Request):
+    return render_research_ui(request)
 
 
 @router.get("/results", response_class=HTMLResponse, summary="Results Visualization View")
-def get_results_view():
-    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+def get_results_view(request: Request):
+    return render_research_ui(request)
 
 
 @router.get("/compare", response_class=HTMLResponse, summary="Experiment Comparison View")
-def get_compare_view():
-    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+def get_compare_view(request: Request):
+    return render_research_ui(request)
 
 
 @router.get("/audit", response_class=HTMLResponse, summary="Provenance & Audit View")
-def get_audit_view():
-    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+def get_audit_view(request: Request):
+    return render_research_ui(request)
 
 
 @router.get("/settings", response_class=HTMLResponse, summary="Settings & Broker Connections View")
-def get_settings_view():
-    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+def get_settings_view(request: Request):
+    return render_research_ui(request)
 
 
 @router.get("/paper-trading", response_class=HTMLResponse, summary="Paper Trading Dashboard View")
-def get_paper_trading_view():
-    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+def get_paper_trading_view(request: Request):
+    return render_research_ui(request)
 
 
 @router.get("/paper-trading/{session_id}", response_class=HTMLResponse, summary="Paper Trading Session Detail View")
-def get_paper_trading_session_view(session_id: str):
-    return HTMLResponse(content=RESEARCH_UI_HTML, status_code=200)
+def get_paper_trading_session_view(session_id: str, request: Request):
+    return render_research_ui(request)
+
 
 

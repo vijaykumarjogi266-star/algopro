@@ -50,7 +50,7 @@ async def get_system_info(_role: Role = Depends(require_reader)) -> SystemInfoRe
             allow_real_broker_execution=settings.ALLOW_REAL_BROKER_EXECUTION,
             require_data_validation=settings.REQUIRE_DATA_VALIDATION,
             enforce_strict_lookahead_protection=settings.ENFORCE_STRICT_LOOKAHEAD_PROTECTION,
-            stage="Stage 1: Foundation",
+            stage=settings.LIFECYCLE_STATE,
             active_guardrails=[
                 "HARD_LOCK: Live Trading Disabled",
                 "HARD_LOCK: Real Broker Execution Disabled",

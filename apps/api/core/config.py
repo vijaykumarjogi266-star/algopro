@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from apps.api.core.project_state import CURRENT_LIFECYCLE_STATE, SEMANTIC_VERSION
+
 
 PLACEHOLDER_SECRETS = {
     "REQUIRED_IN_PRODUCTION",
@@ -31,7 +33,15 @@ PLACEHOLDER_SECRETS = {
     "12345678",
 }
 
-VALID_ROLES = frozenset(["reader", "researcher", "operator", "administrator"])
+VALID_ROLES = frozenset([
+    "viewer",
+    "reader",
+    "researcher",
+    "operator",
+    "risk_admin",
+    "administrator",
+    "system_admin",
+])
 
 VALID_ENVIRONMENTS = {
     "development": "development",
@@ -137,7 +147,8 @@ class Settings(BaseSettings):
 
     # Core metadata
     PROJECT_NAME: str = "Algo Lab Quantitative Research OS"
-    PROJECT_VERSION: str = "0.1.0"
+    PROJECT_VERSION: str = SEMANTIC_VERSION
+    LIFECYCLE_STATE: str = CURRENT_LIFECYCLE_STATE.value
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 
@@ -149,11 +160,14 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
-    # Security Configuration
+    # Security Configuration & Scoped RBAC Keys
     ALGO_LAB_API_KEY: str = ""
+    ALGO_LAB_API_KEY_SYSTEM_ADMIN: str = ""
     ALGO_LAB_API_KEY_ADMIN: str = ""
+    ALGO_LAB_API_KEY_RISK_ADMIN: str = ""
     ALGO_LAB_API_KEY_OPERATOR: str = ""
     ALGO_LAB_API_KEY_RESEARCHER: str = ""
+    ALGO_LAB_API_KEY_VIEWER: str = ""
     ALGO_LAB_API_KEY_READER: str = ""
     ALGO_LAB_API_KEYS_JSON: str = ""
     CIRCUIT_BREAKER_REARM_SECRET: str = ""
@@ -161,6 +175,11 @@ class Settings(BaseSettings):
     CIRCUIT_BREAKER_STATE_PATH: str = "data/circuit_breaker_state.json"
     BROKER_CREDENTIAL_ENCRYPTION_KEY: str = ""
     ALLOW_LOCAL_AUTH_BYPASS: bool = False
+
+    # Request Protections & Rate Limiting
+    REQUEST_BODY_MAX_BYTES: int = 2 * 1024 * 1024  # 2MB max request body
+    REQUEST_TIMEOUT_SECONDS: float = 30.0           # 30s request execution timeout
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = 120       # 120 requests/minute default rate limit
 
     # Database
     POSTGRES_USER: str = "algolab"
