@@ -12,53 +12,50 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
-# Indian Standard Time (IST)
-IST_TZ = ZoneInfo("Asia/Kolkata")
+from services.market_data.calendar_provider import (
+    CalendarProvider,
+    VersionedCalendarProvider,
+    IST_TZ,
+    SESSION_PRE_OPEN_START,
+    SESSION_PRE_OPEN_END,
+    SESSION_START_TIME,
+    SESSION_END_TIME,
+    SESSION_POST_CLOSE_START,
+    SESSION_POST_CLOSE_END,
+)
 
-# Standard NSE/BSE Equity Session Times (IST)
-SESSION_PRE_OPEN_START = time(9, 0)
-SESSION_PRE_OPEN_END = time(9, 8)
-SESSION_START_TIME = time(9, 15)
-SESSION_END_TIME = time(15, 30)
-SESSION_POST_CLOSE_START = time(15, 40)
-SESSION_POST_CLOSE_END = time(16, 0)
-
-# Sample Official NSE Holidays for 2024-2026 (Republic Day, Holi, Independence Day, Diwali, etc.)
-OFFICIAL_HOLIDAYS_NSE: Set[date] = {
-    date(2024, 1, 26),  # Republic Day
-    date(2024, 3, 8),   # Mahashivratri
-    date(2024, 3, 25),  # Holi
-    date(2024, 4, 11),  # Id-Ul-Fitr
-    date(2024, 4, 17),  # Shri Ram Navami
-    date(2024, 5, 1),   # Maharashtra Day
-    date(2024, 6, 17),  # Bakri Id
-    date(2024, 7, 17),  # Muharram
-    date(2024, 8, 15),  # Independence Day
-    date(2024, 10, 2),  # Mahatma Gandhi Jayanti
-    date(2024, 11, 1),  # Diwali Laxmi Pujan
-    date(2024, 11, 15), # Gurunanak Jayanti
-    date(2024, 12, 25), # Christmas
-    # 2025
-    date(2025, 1, 26),
-    date(2025, 8, 15),
-    date(2025, 10, 2),
-    date(2025, 12, 25),
-    # 2026
-    date(2026, 1, 26),
-    date(2026, 8, 15),
-    date(2026, 10, 2),
-    date(2026, 12, 25),
-}
+# Export legacy holiday set for backward compatibility
+_DEFAULT_PROVIDER = VersionedCalendarProvider()
+OFFICIAL_HOLIDAYS_NSE: Set[date] = (
+    _DEFAULT_PROVIDER.get_holidays_for_year(2024)
+    | _DEFAULT_PROVIDER.get_holidays_for_year(2025)
+    | _DEFAULT_PROVIDER.get_holidays_for_year(2026)
+)
 
 
 class IndianMarketCalendar:
     """Provides authoritative validation for Indian market sessions."""
 
-    def __init__(self, custom_holidays: Optional[Set[date]] = None):
-        self.holidays = custom_holidays or OFFICIAL_HOLIDAYS_NSE
+    def __init__(
+        self,
+        custom_holidays: Optional[Set[date]] = None,
+        provider: Optional[CalendarProvider] = None,
+    ):
+        if provider is not None:
+            self._provider = provider
+            self.holidays = custom_holidays or OFFICIAL_HOLIDAYS_NSE
+        elif custom_holidays is not None:
+            self.holidays = custom_holidays
+            self._provider = None
+        else:
+            self._provider = _DEFAULT_PROVIDER
+            self.holidays = OFFICIAL_HOLIDAYS_NSE
 
     def is_trading_day(self, dt: datetime | date) -> bool:
         """Determines if a given calendar day is a scheduled trading day (Monday-Friday, non-holiday)."""
+        if self._provider is not None:
+            return self._provider.is_trading_day(dt)
+
         d = dt.date() if isinstance(dt, datetime) else dt
         # Weekends: Saturday (5), Sunday (6)
         if d.weekday() >= 5:
@@ -81,6 +78,9 @@ class IndianMarketCalendar:
         Returns:
             Tuple[bool, str]: (is_valid, reason)
         """
+        if self._provider is not None:
+            return self._provider.is_regular_trading_session(dt)
+
         ist_dt = self.to_ist(dt)
         calendar_date = ist_dt.date()
 
@@ -99,6 +99,9 @@ class IndianMarketCalendar:
 
     def get_session_boundaries(self, d: date) -> Optional[Tuple[datetime, datetime]]:
         """Returns UTC session start and end datetimes for a given trading date."""
+        if self._provider is not None and hasattr(self._provider, "get_session_boundaries"):
+            return self._provider.get_session_boundaries(d)
+
         if not self.is_trading_day(d):
             return None
 
