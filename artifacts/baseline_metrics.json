@@ -1,0 +1,20 @@
+{
+  "initial_capital": 100000.0,
+  "total_trades": 1327,
+  "wins": 312,
+  "losses": 1015,
+  "win_rate_pct": 23.51,
+  "gross_pnl": -4033.3,
+  "total_friction": 61549.11,
+  "net_pnl": -65582.41,
+  "total_return_pct": -65.58,
+  "profit_factor": 0.951,
+  "net_expectancy_per_trade": -49.42,
+  "average_win": 206.19,
+  "average_loss": -127.99,
+  "win_loss_ratio": 1.61,
+  "max_drawdown_inr": 66651.72,
+  "max_drawdown_pct": 66.65,
+  "avg_holding_minutes": 80.4,
+  "symbol_count_scanned": 50
+}

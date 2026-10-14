@@ -1,0 +1,6 @@
+strategy,total_trades,wins,losses,win_rate,gross_pnl,total_friction,net_pnl,profit_factor,max_drawdown,max_dd_pct,expectancy
+Pivot_R1_Enhanced,74,12,62,16.22,-4546.92,3403.32,-7950.24,0.427,7880.58,7.88,-107.44
+ORB_15m_Breakout,118,19,99,16.1,-7514.4,5479.51,-12993.91,0.378,13093.38,13.09,-110.12
+VWAP_Mean_Reversion,118,51,67,43.22,-3358.63,5518.91,-8877.54,0.823,9140.29,9.14,-75.23
+VP_First_Pullback_8_20EMA,120,25,95,20.83,-11564.09,5572.55,-17136.64,0.48,17418.6,17.42,-142.81
+VP_Red_To_Green_Reversal,110,21,89,19.09,-8337.23,5092.81,-13430.04,0.36,13150.59,13.15,-122.09

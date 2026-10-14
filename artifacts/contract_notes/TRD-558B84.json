@@ -1,0 +1,19 @@
+{
+  "trade_id": "TRD-558B84",
+  "strategy": "Pivot_R1_Enhanced",
+  "symbol": "INFY",
+  "quantity": 43,
+  "buy_price": 1031.46,
+  "sell_price": 1021.29,
+  "gross_pnl": -437.31,
+  "net_pnl": -484.05,
+  "brokerage": 26.48,
+  "stt": 10.98,
+  "exchange_charges": 2.62,
+  "gst": 5.25,
+  "sebi_charges": 0.08,
+  "stamp_duty": 1.33,
+  "total_friction": 46.74,
+  "exit_reason": "STOP_LOSS",
+  "timestamp": "2026-10-11T17:17:10.375658+00:00"
+}

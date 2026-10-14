@@ -1,0 +1,402 @@
+{
+  "ADANIENT": {
+    "status": "VALID",
+    "total_bars": 4389,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "ADANIPORTS": {
+    "status": "VALID",
+    "total_bars": 4390,
+    "zero_volume_bars": 61,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:10:00+05:30"
+  },
+  "APOLLOHOSP": {
+    "status": "VALID",
+    "total_bars": 4386,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "ASIANPAINT": {
+    "status": "VALID",
+    "total_bars": 4390,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "AXISBANK": {
+    "status": "VALID",
+    "total_bars": 4396,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "BAJAJ-AUTO": {
+    "status": "VALID",
+    "total_bars": 4385,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "BAJAJFINSV": {
+    "status": "VALID",
+    "total_bars": 4389,
+    "zero_volume_bars": 61,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:10:00+05:30"
+  },
+  "BAJFINANCE": {
+    "status": "VALID",
+    "total_bars": 4397,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "BEL": {
+    "status": "VALID",
+    "total_bars": 4398,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:10:00+05:30"
+  },
+  "BHARTIARTL": {
+    "status": "VALID",
+    "total_bars": 4393,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "BSE": {
+    "status": "VALID",
+    "total_bars": 4395,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:10:00+05:30"
+  },
+  "CIPLA": {
+    "status": "VALID",
+    "total_bars": 4389,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "COALINDIA": {
+    "status": "VALID",
+    "total_bars": 4399,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "DRREDDY": {
+    "status": "VALID",
+    "total_bars": 4393,
+    "zero_volume_bars": 61,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "EICHERMOT": {
+    "status": "VALID",
+    "total_bars": 4389,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:10:00+05:30"
+  },
+  "ETERNAL": {
+    "status": "VALID",
+    "total_bars": 4396,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "GRASIM": {
+    "status": "VALID",
+    "total_bars": 4391,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "HCLTECH": {
+    "status": "VALID",
+    "total_bars": 4392,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "HDFCBANK": {
+    "status": "VALID",
+    "total_bars": 4401,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "HDFCLIFE": {
+    "status": "VALID",
+    "total_bars": 4396,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "HINDALCO": {
+    "status": "VALID",
+    "total_bars": 4397,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "HINDUNILVR": {
+    "status": "VALID",
+    "total_bars": 4394,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "ICICIBANK": {
+    "status": "VALID",
+    "total_bars": 4390,
+    "zero_volume_bars": 61,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "INDIGO": {
+    "status": "VALID",
+    "total_bars": 4386,
+    "zero_volume_bars": 61,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "INFY": {
+    "status": "VALID",
+    "total_bars": 4395,
+    "zero_volume_bars": 61,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "ITC": {
+    "status": "VALID",
+    "total_bars": 4400,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "JIOFIN": {
+    "status": "VALID",
+    "total_bars": 4401,
+    "zero_volume_bars": 58,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "JSWSTEEL": {
+    "status": "VALID",
+    "total_bars": 4389,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "KOTAKBANK": {
+    "status": "VALID",
+    "total_bars": 4397,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:10:00+05:30"
+  },
+  "LT": {
+    "status": "VALID",
+    "total_bars": 4392,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "M&M": {
+    "status": "VALID",
+    "total_bars": 4392,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "MARUTI": {
+    "status": "VALID",
+    "total_bars": 4392,
+    "zero_volume_bars": 61,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "MAXHEALTH": {
+    "status": "VALID",
+    "total_bars": 4391,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "NESTLEIND": {
+    "status": "VALID",
+    "total_bars": 4391,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "NTPC": {
+    "status": "VALID",
+    "total_bars": 4398,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "ONGC": {
+    "status": "VALID",
+    "total_bars": 4399,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "POWERGRID": {
+    "status": "VALID",
+    "total_bars": 4396,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "RELIANCE": {
+    "status": "VALID",
+    "total_bars": 4399,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "SBILIFE": {
+    "status": "VALID",
+    "total_bars": 4386,
+    "zero_volume_bars": 62,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "SBIN": {
+    "status": "VALID",
+    "total_bars": 4399,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "SHRIRAMFIN": {
+    "status": "VALID",
+    "total_bars": 4396,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "SUNPHARMA": {
+    "status": "VALID",
+    "total_bars": 4394,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "TATACONSUM": {
+    "status": "VALID",
+    "total_bars": 4398,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "TATASTEEL": {
+    "status": "VALID",
+    "total_bars": 4398,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "TCS": {
+    "status": "VALID",
+    "total_bars": 4391,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "TECHM": {
+    "status": "VALID",
+    "total_bars": 4389,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "TITAN": {
+    "status": "VALID",
+    "total_bars": 4391,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "TMPV": {
+    "status": "VALID",
+    "total_bars": 4401,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "TRENT": {
+    "status": "VALID",
+    "total_bars": 4387,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:15:00+05:30"
+  },
+  "ULTRACEMCO": {
+    "status": "VALID",
+    "total_bars": 4378,
+    "zero_volume_bars": 60,
+    "nan_price_bars": 0,
+    "start": "2026-07-16 09:15:00+05:30",
+    "end": "2026-10-09 15:10:00+05:30"
+  }
+}

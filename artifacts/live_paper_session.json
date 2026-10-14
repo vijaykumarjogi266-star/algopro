@@ -1,0 +1,17 @@
+{
+  "timestamp_ist": "2026-10-12 08:15:49 IST",
+  "market_phase": "STANDBY_COUNTDOWN",
+  "phase_message": "Pre-market starts in 0h 44m 11s",
+  "session_date": "2026-10-12",
+  "base_capital_inr": 10000.0,
+  "leverage": "5.0x (NSE Intraday MIS)",
+  "effective_buying_power_inr": 50000.0,
+  "available_cash_inr": 10000.0,
+  "net_portfolio_pnl": 0.0,
+  "daily_trades_taken": 0,
+  "max_daily_trades": 2,
+  "circuit_breaker_active": false,
+  "open_positions": {},
+  "completed_trades_today": 0,
+  "safety_mode": "STRICT_PAPER_TRADING_ONLY"
+}

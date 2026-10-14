@@ -1,0 +1,19 @@
+{
+  "trade_id": "TRD-5B8B5E",
+  "strategy": "Pivot_R1_Enhanced",
+  "symbol": "SBIN",
+  "quantity": 46,
+  "buy_price": 960.57,
+  "sell_price": 973.16,
+  "gross_pnl": 579.14,
+  "net_pnl": 531.92,
+  "brokerage": 26.69,
+  "stt": 11.19,
+  "exchange_charges": 2.64,
+  "gst": 5.29,
+  "sebi_charges": 0.08,
+  "stamp_duty": 1.33,
+  "total_friction": 47.22,
+  "exit_reason": "TAKE_PROFIT",
+  "timestamp": "2026-10-11T17:16:38.369311+00:00"
+}

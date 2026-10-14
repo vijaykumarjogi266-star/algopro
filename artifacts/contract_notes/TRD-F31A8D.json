@@ -1,0 +1,19 @@
+{
+  "trade_id": "TRD-F31A8D",
+  "strategy": "Pivot_R1_Enhanced",
+  "symbol": "ICICIBANK",
+  "quantity": 33,
+  "buy_price": 1363.45,
+  "sell_price": 1381.87,
+  "gross_pnl": 607.86,
+  "net_pnl": 559.76,
+  "brokerage": 27.18,
+  "stt": 11.4,
+  "exchange_charges": 2.69,
+  "gst": 5.39,
+  "sebi_charges": 0.09,
+  "stamp_duty": 1.35,
+  "total_friction": 48.1,
+  "exit_reason": "TAKE_PROFIT",
+  "timestamp": "2026-10-11T17:14:21.455889+00:00"
+}

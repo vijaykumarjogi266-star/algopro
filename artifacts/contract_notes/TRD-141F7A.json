@@ -1,0 +1,19 @@
+{
+  "trade_id": "TRD-141F7A",
+  "strategy": "Pivot_R1_Enhanced",
+  "symbol": "HDFCBANK",
+  "quantity": 63,
+  "buy_price": 710.05,
+  "sell_price": 719.28,
+  "gross_pnl": 581.49,
+  "net_pnl": 533.68,
+  "brokerage": 27.01,
+  "stt": 11.33,
+  "exchange_charges": 2.68,
+  "gst": 5.36,
+  "sebi_charges": 0.09,
+  "stamp_duty": 1.34,
+  "total_friction": 47.81,
+  "exit_reason": "TAKE_PROFIT",
+  "timestamp": "2026-10-11T17:14:21.053994+00:00"
+}
