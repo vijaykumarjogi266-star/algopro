@@ -374,7 +374,7 @@ class CircuitBreakerEngine:
         if not self.state_file_path:
             return
         try:
-            self._sequence_id = getattr(self, "_sequence_id", 0) + 1
+            self._sequence_id = self._sequence_id + 1
             payload = {
                 "schema_version": 1,
                 "sequence_id": self._sequence_id,
@@ -536,15 +536,15 @@ class CircuitBreakerEngine:
             if raw_seq is not None:
                 if not isinstance(raw_seq, int) or raw_seq < 0:
                     raise ValueError(f"Invalid sequence_id in state file: {raw_seq}")
-                self._sequence_id = max(getattr(self, "_sequence_id", 0), raw_seq)
+                self._sequence_id = max(self._sequence_id, raw_seq)
 
             # Replay of stale NORMAL state file check (F06)
             if raw_state == GatewayState.NORMAL.value:
                 age_sec = (now_utc - state_ts).total_seconds()
-                max_age = getattr(self.config, "max_state_age_seconds", 3600.0)
+                max_age = self.config.max_state_age_seconds
                 if age_sec > max_age:
                     raise ValueError(f"Stale NORMAL state file detected (age {age_sec:.1f}s > {max_age}s). Replay rejected.")
-                expected_min = getattr(self.config, "expected_min_sequence", None)
+                expected_min = self.config.expected_min_sequence
                 if expected_min is not None and (raw_seq is None or raw_seq < expected_min):
                     raise ValueError(f"Replayed sequence {raw_seq} is older than expected minimum {expected_min}")
 

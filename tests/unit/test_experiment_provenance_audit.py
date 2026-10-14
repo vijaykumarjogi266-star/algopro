@@ -64,6 +64,7 @@ def make_experiment(
 def test_lifecycle_audit_event_sequence():
     """Verifies complete chronological event sequence: Signal -> Proposal -> Risk -> Fill -> State."""
     service = BacktestService()
+    service.seed_test_default_dataset()
     exp = make_experiment(experiment_id="exp_seq_001")
     service.store.save_experiment(exp)
 
@@ -106,6 +107,7 @@ def test_risk_rejection_audit_visibility():
     # The simulated trade of 10 shares * 2500 INR = 25,000 INR will trigger EXCEEDS_MAX_CAPITAL
     strict_risk = RiskEngine(HardRiskLimits(max_capital_per_trade_pct=0.01))
     service = BacktestService(risk_engine=strict_risk)
+    service.seed_test_default_dataset()
 
     exp = make_experiment(experiment_id="exp_risk_rej_001")
     service.store.save_experiment(exp)
@@ -169,6 +171,7 @@ def test_api_provenance_endpoint():
 def test_api_audit_trail_endpoint():
     """Verifies GET /api/v1/experiments/{experiment_id}/runs/{run_id}/audit endpoint."""
     service = BacktestService()
+    service.seed_test_default_dataset()
     set_service(service)
     client = TestClient(app)
 

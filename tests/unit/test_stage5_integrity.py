@@ -165,6 +165,7 @@ def test_concurrent_experiment_isolation():
     """Multiple simultaneous backtests execute concurrently without state leakage or data corruption."""
     store = BacktestRunStore(":memory:")
     service = BacktestService(store=store, max_workers=4)
+    service.seed_test_default_dataset()
 
     exp_ids = [f"exp_conc_{i}" for i in range(5)]
     experiments = [make_test_exp(eid, capital=500_000.0 + i * 10_000) for i, eid in enumerate(exp_ids)]
