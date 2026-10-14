@@ -80,8 +80,8 @@ def test_valid_flat_and_open_position_ledgers_reconcile(tmp_path):
 
     # Case A: Flat ledger (no open positions, realized trade with fees & slippage)
     # Initial: 50,000. Realized PnL: +1,200. Fees: 45.50. Slippage: 12.25.
-    # Expected Cash: 50000 + 1200 - 45.50 - 12.25 = 51142.25
-    flat_cash = 51142.25
+    # Canonical Expected Cash: 50000 + 1200 - 45.50 = 51154.50 (slippage is attribution only)
+    flat_cash = 51154.50
     is_rec, imb, err = sentinel.execute_eod_reconciliation_and_tearsheet(
         portfolio_equity=flat_cash,
         open_positions_count=0,
@@ -97,8 +97,8 @@ def test_valid_flat_and_open_position_ledgers_reconcile(tmp_path):
     # Case B: Open position ledger
     # Cost basis = 20,000 (10 shs RELIANCE @ 2000). Current price = 2100 (market val = 21,000)
     # Realized PnL = 500. Fees = 30. Slippage = 8.
-    # Expected Cash = 50000 + 500 - 30 - 8 - 20000 = 30462.00
-    # Portfolio Equity = 30462 + 21000 = 51462.00
+    # Canonical Expected Cash = 50000 + 500 - 30 - 20000 = 30470.00
+    # Portfolio Equity = 30470 + 21000 = 51470.00
     open_positions = {
         "RELIANCE": {
             "quantity": 10,
@@ -107,9 +107,9 @@ def test_valid_flat_and_open_position_ledgers_reconcile(tmp_path):
             "cost_basis": 20000.0,
         }
     }
-    open_cash = 30462.00
+    open_cash = 30470.00
     is_rec, imb, err = sentinel.execute_eod_reconciliation_and_tearsheet(
-        portfolio_equity=51462.00,
+        portfolio_equity=51470.00,
         open_positions_count=1,
         cash=open_cash,
         realized_pnl=500.0,
@@ -120,12 +120,12 @@ def test_valid_flat_and_open_position_ledgers_reconcile(tmp_path):
     assert is_rec is True
     assert pytest.approx(imb, abs=1e-4) == 0.0
 
-    # Case C: Alter cash beyond tolerance (51142.25 -> 51145.00, drift of 2.75 > 0.05)
+    # Case C: Alter cash beyond tolerance (51154.50 -> 51158.00, drift of 3.50 > 0.05)
     sentinel.is_killswitch_tripped = False
     is_rec_drift, imb_drift, err_drift = sentinel.execute_eod_reconciliation_and_tearsheet(
-        portfolio_equity=51145.00,
+        portfolio_equity=51158.00,
         open_positions_count=0,
-        cash=51145.00,
+        cash=51158.00,
         realized_pnl=1200.0,
         total_fees=45.50,
         total_slippage=12.25,
@@ -146,7 +146,7 @@ def test_valid_flat_and_open_position_ledgers_reconcile(tmp_path):
         }
     }
     is_rec_cb, imb_cb, err_cb = sentinel.execute_eod_reconciliation_and_tearsheet(
-        portfolio_equity=51462.00,
+        portfolio_equity=51470.00,
         open_positions_count=1,
         cash=open_cash,
         realized_pnl=500.0,
@@ -155,5 +155,5 @@ def test_valid_flat_and_open_position_ledgers_reconcile(tmp_path):
         positions=corrupted_positions,
     )
     assert is_rec_cb is False
-    assert imb_cb in (pytest.approx(92.0, abs=1e-2), pytest.approx(100.0, abs=1e-2))
+    assert pytest.approx(imb_cb, abs=1e-2) == 100.0
     assert sentinel.is_killswitch_tripped is True

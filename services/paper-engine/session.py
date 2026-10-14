@@ -179,15 +179,39 @@ class PaperPortfolio(BaseModel):
         - Slippage attribution = abs(fill_price - reference_price) * quantity (tracked as attribution metric, NOT deducted a second time from cash).
         - Mark-to-market uses independently supplied market mark (not slipped fill price).
         - Gross realized PnL = quantity * (sell_price - buy_price). Net realized PnL = gross - fees.
+        - Complete atomicity: validates solvency and holdings BEFORE mutating any field.
         """
-        sym = fill.symbol.upper()
+        import math
+
+        # 1. Finite and positive input validation
+        if not isinstance(fill.quantity, int) or fill.quantity <= 0:
+            raise ValueError(f"Fill quantity must be a positive integer, got {fill.quantity}")
+
+        for name, val in [
+            ("fill_price", fill.fill_price),
+            ("transaction_costs", fill.transaction_costs),
+            ("cash", self.cash),
+            ("initial_capital", self.initial_capital),
+        ]:
+            if not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+                raise ValueError(f"Nonfinite ledger value detected for {name}: {val}")
+
+        if fill.fill_price <= 0.0:
+            raise ValueError(f"Fill price must be strictly positive, got {fill.fill_price}")
+        if fill.transaction_costs < 0.0:
+            raise ValueError(f"Transaction costs cannot be negative, got {fill.transaction_costs}")
+
         ref_price = getattr(fill, "base_price", fill.fill_price)
+        if not isinstance(ref_price, (int, float)) or math.isnan(ref_price) or math.isinf(ref_price) or ref_price <= 0.0:
+            ref_price = fill.fill_price
+
         slip_cost = fill.slippage_cost if getattr(fill, "slippage_cost", None) is not None else round(abs(fill.fill_price - ref_price) * fill.quantity, 4)
+        if not isinstance(slip_cost, (int, float)) or math.isnan(slip_cost) or math.isinf(slip_cost) or slip_cost < 0.0:
+            raise ValueError(f"Nonfinite or negative slippage cost: {slip_cost}")
 
-        self.total_fees_paid = round(self.total_fees_paid + fill.transaction_costs, 4)
-        self.total_slippage_paid = round(self.total_slippage_paid + slip_cost, 4)
-        self.lifetime_trades += 1
+        sym = fill.symbol.upper()
 
+        # 2. Defensive business validation BEFORE ANY STATE MUTATION
         if fill.side == OrderSide.BUY:
             total_outflow = round((fill.quantity * fill.fill_price) + fill.transaction_costs, 4)
             if self.cash < total_outflow:
@@ -195,6 +219,21 @@ class PaperPortfolio(BaseModel):
                     f"Defensive cash invariant violation: Available cash INR {self.cash:.2f} "
                     f"is insufficient for required outflow INR {total_outflow:.2f}"
                 )
+        else:
+            # SELL side: strictly require existing long holdings and prevent oversell
+            pos = self.positions.get(sym)
+            if pos is None or pos.quantity <= 0:
+                raise ValueError(
+                    f"Oversell rejected: No open long position for symbol '{sym}' (holding: 0, requested sell: {fill.quantity}). Naked shorting is prohibited."
+                )
+            if fill.quantity > pos.quantity:
+                raise ValueError(
+                    f"Oversell rejected: Requested sell quantity {fill.quantity} exceeds current holding of {pos.quantity} for '{sym}'. Overselling is prohibited."
+                )
+
+        # 3. Atomic state mutation (all validations passed)
+        if fill.side == OrderSide.BUY:
+            total_outflow = round((fill.quantity * fill.fill_price) + fill.transaction_costs, 4)
             self.cash = round(self.cash - total_outflow, 4)
 
             pos = self.positions.get(sym)
@@ -211,7 +250,6 @@ class PaperPortfolio(BaseModel):
                     slippage_paid=slip_cost,
                 )
             else:
-                # Average into existing long
                 new_qty = pos.quantity + fill.quantity
                 new_cost = pos.cost_basis + (fill.quantity * fill.fill_price)
                 pos.average_entry_price = round(new_cost / new_qty, 4)
@@ -221,29 +259,26 @@ class PaperPortfolio(BaseModel):
                 pos.fees_paid = round(pos.fees_paid + fill.transaction_costs, 4)
                 pos.slippage_paid = round(pos.slippage_paid + slip_cost, 4)
         else:
-            # SELL side (closing or reducing long)
-            pos = self.positions.get(sym)
-            if pos is not None and pos.quantity > 0:
-                closed_qty = min(pos.quantity, fill.quantity)
-                cost_of_closed = closed_qty * pos.average_entry_price
-                proceeds = closed_qty * fill.fill_price
-                realized_gross = proceeds - cost_of_closed
-                self.total_realized_pnl = round(self.total_realized_pnl + realized_gross, 4)
+            pos = self.positions[sym]
+            cost_of_closed = round(fill.quantity * pos.average_entry_price, 4)
+            proceeds = round(fill.quantity * fill.fill_price, 4)
+            realized_gross = round(proceeds - cost_of_closed, 4)
+            net_inflow = round(proceeds - fill.transaction_costs, 4)
 
-                net_inflow = (fill.quantity * fill.fill_price) - fill.transaction_costs
-                self.cash = round(self.cash + net_inflow, 4)
+            self.cash = round(self.cash + net_inflow, 4)
+            self.total_realized_pnl = round(self.total_realized_pnl + realized_gross, 4)
 
-                rem_qty = pos.quantity - closed_qty
-                if rem_qty == 0:
-                    del self.positions[sym]
-                else:
-                    pos.quantity = rem_qty
-                    pos.cost_basis = round(rem_qty * pos.average_entry_price, 4)
-                    pos.market_value = round(rem_qty * pos.current_price, 4)
+            rem_qty = pos.quantity - fill.quantity
+            if rem_qty == 0:
+                del self.positions[sym]
             else:
-                net_inflow = (fill.quantity * fill.fill_price) - fill.transaction_costs
-                self.cash = round(self.cash + net_inflow, 4)
+                pos.quantity = rem_qty
+                pos.cost_basis = round(rem_qty * pos.average_entry_price, 4)
+                pos.market_value = round(rem_qty * pos.current_price, 4)
 
+        self.total_fees_paid = round(self.total_fees_paid + fill.transaction_costs, 4)
+        self.total_slippage_paid = round(self.total_slippage_paid + slip_cost, 4)
+        self.lifetime_trades += 1
         self._update_pnl_and_hwm()
 
 
@@ -502,7 +537,12 @@ class PaperTradingEngine:
                 target_price=target_price,
             )
 
-            # 3. Risk check against session portfolio metrics & cash solvency
+            # 3. Risk check against session portfolio metrics & cash solvency & holdings
+            current_sym_holding = 0
+            pos = session.portfolio.positions.get(symbol.upper())
+            if pos:
+                current_sym_holding = pos.quantity
+
             evaluated = self.lifecycle_manager.evaluate_risk(
                 order,
                 current_portfolio_value=session.portfolio.total_equity,
@@ -510,6 +550,7 @@ class PaperTradingEngine:
                 current_drawdown_pct=session.portfolio.max_drawdown_pct,
                 current_open_positions_count=len(session.portfolio.positions),
                 available_cash=session.portfolio.cash,
+                current_holding=current_sym_holding,
             )
 
             session.orders.append(evaluated)
@@ -521,10 +562,17 @@ class PaperTradingEngine:
 
             # 5. Fill via adapter
             filled_order, fill = self.broker_adapter.submit_paper_order(evaluated, execution_price=price)
-            session.fills.append(fill)
 
-            # 6. Mutate portfolio with fill
-            session.portfolio.on_fill(fill)
+            # 6. Mutate portfolio with fill atomically
+            try:
+                session.portfolio.on_fill(fill)
+                session.fills.append(fill)
+            except Exception as e:
+                evaluated.state = OrderLifecycleState.ORDER_REJECTED
+                evaluated.rejection_reason = str(e)
+                self._persist_session(session)
+                raise
+
             if self.circuit_breaker is not None:
                 self.circuit_breaker.update_equity(session.portfolio.total_equity)
             self._persist_session(session)

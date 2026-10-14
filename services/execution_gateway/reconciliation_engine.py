@@ -197,24 +197,19 @@ class DoubleEntryLedgerReconciler:
         total_cost_basis = sum(pos.get("cost_basis", pos.get("quantity", 0) * pos.get("avg_price", 0.0)) for pos in positions.values())
         total_market_val = sum(pos.get("quantity", 0) * pos.get("current_price", 0.0) for pos in positions.values())
 
-        # Fill-price consistent accounting: cost_basis incorporates fill_price, slippage is attribution only
-        expected_cash_fill = initial_cash + realized_pnl - total_fees_paid - total_cost_basis
-        imbalance_fill = abs(current_cash - expected_cash_fill)
+        # Single Canonical Accounting Model (INV-47/INV-50):
+        # Fill-price consistent accounting: cost_basis incorporates executed fill_price.
+        # Slippage is an attribution metric, NOT a secondary deduction from cash.
+        expected_cash = initial_cash + realized_pnl - total_fees_paid - total_cost_basis
+        imbalance = abs(current_cash - expected_cash)
 
-        # Legacy separated-slippage accounting (if cost basis used base_price instead of fill_price)
-        expected_cash_legacy = initial_cash + realized_pnl - total_fees_paid - total_slippage_paid - total_cost_basis
-        imbalance_legacy = abs(current_cash - expected_cash_legacy)
-
-        if imbalance_fill <= tolerance:
-            return True, 0.0, None
-        if imbalance_legacy <= tolerance:
+        if imbalance <= tolerance:
             return True, 0.0, None
 
-        best_imbalance = min(imbalance_fill, imbalance_legacy)
         return (
             False,
-            best_imbalance,
-            f"Double-entry cash imbalance detected: Expected INR {expected_cash_fill:.2f}, Actual INR {current_cash:.2f} (Delta: {best_imbalance:.4f})"
+            imbalance,
+            f"Double-entry cash imbalance detected: Expected INR {expected_cash:.2f}, Actual INR {current_cash:.2f} (Delta: {imbalance:.4f})"
         )
 
     @staticmethod

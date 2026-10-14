@@ -167,6 +167,7 @@ class ExecutionLifecycleManager:
         current_drawdown_pct: float = 0.0,
         current_open_positions_count: int = 0,
         available_cash: Optional[float] = None,
+        current_holding: Optional[int] = None,
     ) -> ExecutionOrder:
         """Step 2 & 3: Evaluates proposal via independent RiskEngine and cash solvency checks.
         
@@ -179,8 +180,20 @@ class ExecutionLifecycleManager:
 
         order.transition_to(OrderLifecycleState.RISK_CHECK_EVALUATED, reason="Submitting to Risk Engine")
 
-        # 1. Exit / Square-off orders reduce portfolio exposure and should not be blocked by entry constraints
+        # 1. Exit / Square-off orders: prevent overselling or naked shorting
         if order.side == OrderSide.SELL:
+            if current_holding is not None:
+                if current_holding <= 0 or order.quantity > current_holding:
+                    order.rejection_code = RiskRejectionCode.OVERSELL_PROHIBITED.value
+                    order.rejection_reason = (
+                        f"Oversell rejected: requested sell {order.quantity} exceeds current holding of {current_holding} for '{order.symbol}'"
+                    )
+                    order.transition_to(
+                        OrderLifecycleState.ORDER_REJECTED,
+                        reason=order.rejection_reason,
+                        rejection_code=order.rejection_code,
+                    )
+                    return order
             order.transition_to(OrderLifecycleState.ORDER_ACCEPTED, reason="Exit order approved for exposure reduction")
             return order
 
