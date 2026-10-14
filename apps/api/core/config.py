@@ -70,6 +70,10 @@ def validate_key_strength(key: str) -> None:
         raise ValueError("API key does not meet strength requirements: minimum length is 16 characters.")
     if is_known_placeholder(key):
         raise ValueError("API key cannot be a known placeholder secret.")
+    if len(set(key)) <= 2:
+        raise ValueError("API key does not meet entropy requirements: repetitive pattern detected.")
+    if key.isdigit():
+        raise ValueError("API key does not meet entropy requirements: purely numeric key is prohibited.")
 
 
 def parse_and_validate_api_keys_json(raw_json: Optional[str]) -> Dict[str, str]:
@@ -255,27 +259,44 @@ class Settings(BaseSettings):
                     "cannot be enabled in production environment."
                 )
 
+            # CORS validation: explicit authorized origins, no wildcards (F01)
+            if not self.CORS_ORIGINS:
+                raise ValueError(
+                    "Production startup failed: CORS_ORIGINS must contain explicit authorized origins."
+                )
+            if any(str(origin).strip() == "*" for origin in self.CORS_ORIGINS):
+                raise ValueError(
+                    "Production startup failed: CORS_ORIGINS cannot allow wildcard '*' in production."
+                )
+
             admin_keys = [k for k, r in key_to_role.items() if r == "administrator"]
             admin_key = self.ALGO_LAB_API_KEY or self.ALGO_LAB_API_KEY_ADMIN
-            if not admin_keys and is_invalid_secret(admin_key):
-                raise ValueError(
-                    "Production startup failed: ALGO_LAB_API_KEY must be a strong, non-placeholder secret."
-                )
+            if not admin_keys:
+                if is_invalid_secret(admin_key):
+                    raise ValueError(
+                        "Production startup failed: ALGO_LAB_API_KEY must be a strong, non-placeholder secret."
+                    )
+                validate_key_strength(admin_key)
+            for k in key_to_role:
+                validate_key_strength(k)
 
             if is_invalid_secret(self.CIRCUIT_BREAKER_REARM_SECRET):
                 raise ValueError(
                     "Production startup failed: CIRCUIT_BREAKER_REARM_SECRET must be configured."
                 )
+            validate_key_strength(self.CIRCUIT_BREAKER_REARM_SECRET)
 
             if is_invalid_secret(self.CIRCUIT_BREAKER_STATE_KEY):
                 raise ValueError(
                     "Production startup failed: CIRCUIT_BREAKER_STATE_KEY must be configured."
                 )
+            validate_key_strength(self.CIRCUIT_BREAKER_STATE_KEY)
 
             if is_invalid_secret(self.BROKER_CREDENTIAL_ENCRYPTION_KEY):
                 raise ValueError(
                     "Production startup failed: BROKER_CREDENTIAL_ENCRYPTION_KEY must be configured."
                 )
+            validate_key_strength(self.BROKER_CREDENTIAL_ENCRYPTION_KEY)
 
         return self
 

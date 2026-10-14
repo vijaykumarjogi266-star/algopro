@@ -505,14 +505,30 @@ class DaemonController:
             self.circuit_breaker.trigger_emergency_halt(reason)
         save_sentinel_state(self.db_path, "emergency_halt", 1.0, session_date=self.current_session_date, text_value=reason)
 
-    def admin_rearm(self, auth_token: str) -> bool:
+    def admin_rearm(self, auth_token: str, ledger_verifier: Optional[Any] = None) -> bool:
+        def _check_daemon_ledger() -> bool:
+            if self.has_unresolved_square_off:
+                return False
+            if self.session and self.session.portfolio:
+                p = self.session.portfolio
+                for pos in p.positions.values():
+                    if getattr(pos, "is_quarantined", False):
+                        return False
+            return True
+
+        active_verifier = ledger_verifier or _check_daemon_ledger
         cb_ok = True
         if self.circuit_breaker is not None:
-            cb_ok = self.circuit_breaker.admin_rearm(auth_token)
+            cb_ok = self.circuit_breaker.admin_rearm(auth_token, ledger_verifier=active_verifier)
+        else:
+            cb_ok = active_verifier()
         if cb_ok:
             self._is_emergency_halted = False
             self._emergency_halt_reason = None
             self.sentinel.is_killswitch_tripped = False
+            if self.session and self.session.status == SessionStatus.EMERGENCY_HALT:
+                self.session.status = SessionStatus.RUNNING
+                self.paper_engine._persist_session(self.session)
             save_sentinel_state(self.db_path, "emergency_halt", 0.0, session_date=self.current_session_date, text_value="")
             return True
         return False

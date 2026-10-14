@@ -684,7 +684,9 @@ class PaperTradingEngine:
                     timestamp=current_time or datetime.now(timezone.utc),
                     strategy_id=strat_id,
                 )
-                self.circuit_breaker.validate_order(payload)
+                self.circuit_breaker.validate_order(
+                    payload, allow_liquidation=(side == OrderSide.SELL)
+                )
 
             # 2. Propose order
             order = self.lifecycle_manager.propose_order(

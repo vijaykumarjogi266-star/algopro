@@ -46,8 +46,8 @@ graph TD
 | **Batch C** | Real Strategy Dispatch & Order Provenance | C01–C07: Registered strategy dispatcher, parameter-driven protection, explicit allocation | 1–3 days | **COMPLETED** |
 | **Batch D** | Accurate Backtest Persistence | D01–D07: Real timestamps throughout, distinct cash/asset curves, causal next-open stops | 1–2 days | **COMPLETED** |
 | **Batch E** | Protective Cutoff & Exchange Sessions | E01–E08: Valid exchange sessions only, in-session quotes, persistent unresolved exit state | 1–2 days | **COMPLETED** |
-| **Batch F** | Production Config & Durable Breaker | F01–F09: Validated settings injection, key strength validation, signed NORMAL persistence | 0.5–1.5 days | **ACTIVE / NEXT** |
-| **Batch G** | Market-Intelligence Safety & Boundaries | G01–G12: Offline fixture separation, finite ratio checks, upstream risk cap enforcement | 2–3 days | PENDING |
+| **Batch F** | Production Config & Durable Breaker | F01–F09: Validated settings injection, key strength validation, signed NORMAL persistence | 0.5–1.5 days | **COMPLETED** |
+| **Batch G** | Market-Intelligence Safety & Boundaries | G01–G12: Offline fixture separation, finite ratio checks, upstream risk cap enforcement | 2–3 days | **ACTIVE / NEXT** |
 | **Batch H** | Real Tests, Locks, Builds & CI Gate | H01–H08: Portable lock verification, all-layer canary scanning, DOM tests, CI gating | 2–4 days | PENDING |
 
 **Total Estimated Implementation Effort**: **11.5 – 21.5 working days**

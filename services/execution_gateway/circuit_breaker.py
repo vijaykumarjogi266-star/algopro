@@ -6,7 +6,7 @@ Monotonic Watchdog Heartbeat > 5.0s, 1.0s Monotonic Rate Limiter, Persistent Dis
 """
 
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import fcntl
 import hashlib
 import hmac
@@ -134,6 +134,7 @@ class CircuitBreakerEngine:
         # Gateway state & trip reasons
         self._state = GatewayState.NORMAL
         self._trip_reasons: List[str] = []
+        self._sequence_id: int = 0
 
         # Load disk state on startup if state_file_path is configured (Fail-Closed Recovery)
         if self.state_file_path:
@@ -201,10 +202,10 @@ class CircuitBreakerEngine:
                 self._trip_halt_locked(f"WATCHDOG_TIMEOUT_EXCEEDED_{elapsed:.2f}s")
                 raise WatchdogTimeoutError(f"Watchdog heartbeat timed out after {elapsed:.2f}s")
 
-    def validate_rate_limit(self) -> None:
+    def validate_rate_limit(self, allow_liquidation: bool = False) -> None:
         """Validate 1.0-second sliding-window monotonic order rate limit."""
         with self._lock:
-            if self._state == GatewayState.EMERGENCY_HALT:
+            if self._state == GatewayState.EMERGENCY_HALT and not allow_liquidation:
                 raise CircuitBreakerTripped("Gateway in EMERGENCY_HALT state")
 
             now_mono = time.monotonic()
@@ -223,13 +224,15 @@ class CircuitBreakerEngine:
         """Alias for update_equity to evaluate drawdown and daily loss."""
         return self.update_equity(current_equity)
 
-    def validate_order(self, order: OrderPayload) -> None:
+    def validate_order(self, order: OrderPayload, allow_liquidation: bool = False) -> None:
         """Validate order submission against circuit breaker state, single order limit, and rate limit."""
+        is_liq = bool(allow_liquidation and order.quantity < 0)
         with self._lock:
             if self._state == GatewayState.EMERGENCY_HALT:
-                raise CircuitBreakerTripped(
-                    f"Gateway in EMERGENCY_HALT: {', '.join(self._trip_reasons)}"
-                )
+                if not is_liq:
+                    raise CircuitBreakerTripped(
+                        f"Gateway in EMERGENCY_HALT: {', '.join(self._trip_reasons)}"
+                    )
             if self._persistence_error:
                 raise CircuitBreakerTripped(
                     f"Gateway state persistence failed: {self._persistence_error}"
@@ -238,14 +241,14 @@ class CircuitBreakerEngine:
                 raise ValueError(
                     f"Order quantity {order.quantity} exceeds max_single_order_qty ({self.config.max_single_order_qty})"
                 )
-        self.validate_rate_limit()
+        self.validate_rate_limit(allow_liquidation=is_liq)
 
     def trigger_emergency_halt(self, reason: str = "MANUAL_EMERGENCY_HALT") -> None:
         """Explicitly trigger emergency halt."""
         with self._lock:
             self._trip_halt_locked(reason)
 
-    def admin_rearm(self, auth_token: str) -> bool:
+    def admin_rearm(self, auth_token: str, ledger_verifier: Optional[Any] = None) -> bool:
         """Re-arm gateway from EMERGENCY_HALT back to NORMAL using admin key."""
         with self._lock:
             if not auth_token or not isinstance(auth_token, str):
@@ -269,6 +272,26 @@ class CircuitBreakerEngine:
                     extra={"audit_event": "CIRCUIT_BREAKER_REARM_FAILED"},
                 )
                 return False
+
+            # Verify clean ledger before allowing order flow (F09)
+            if ledger_verifier is not None:
+                try:
+                    if callable(ledger_verifier):
+                        is_clean = ledger_verifier()
+                    else:
+                        is_clean = bool(ledger_verifier)
+                    if not is_clean:
+                        logger.warning(
+                            "Circuit breaker rearm rejected: ledger verification failed (unsettled state)",
+                            extra={"audit_event": "CIRCUIT_BREAKER_REARM_FAILED"},
+                        )
+                        return False
+                except Exception as e:
+                    logger.error(
+                        f"Circuit breaker rearm rejected: ledger verification exception: {e}",
+                        extra={"audit_event": "CIRCUIT_BREAKER_REARM_FAILED"},
+                    )
+                    return False
 
             # Snapshot current state before attempting durable transition
             saved_state = self._state
@@ -351,8 +374,10 @@ class CircuitBreakerEngine:
         if not self.state_file_path:
             return
         try:
+            self._sequence_id = getattr(self, "_sequence_id", 0) + 1
             payload = {
                 "schema_version": 1,
+                "sequence_id": self._sequence_id,
                 "gateway_state": self._state.value,
                 "trip_reasons": list(self._trip_reasons),
                 "high_water_mark": float(self._high_water_mark),
@@ -490,6 +515,39 @@ class CircuitBreakerEngine:
                     f"Inconsistent equity state: high_water_mark ({hwm}) cannot be less than current_equity ({current})"
                 )
 
+            # Timestamp and sequence validation (F06)
+            ts_str = data.get("timestamp_utc")
+            if not ts_str:
+                raise ValueError("State file missing timestamp_utc")
+            try:
+                state_ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+            except Exception as e:
+                raise ValueError(f"Invalid timestamp_utc in state file: {e}")
+
+            now_utc = datetime.now(timezone.utc)
+            if state_ts.tzinfo is None:
+                state_ts = state_ts.replace(tzinfo=timezone.utc)
+
+            # Future timestamp (> 60s) fails closed
+            if state_ts > now_utc + timedelta(seconds=60):
+                raise ValueError(f"State file timestamp is in the future: {state_ts}")
+
+            raw_seq = data.get("sequence_id")
+            if raw_seq is not None:
+                if not isinstance(raw_seq, int) or raw_seq < 0:
+                    raise ValueError(f"Invalid sequence_id in state file: {raw_seq}")
+                self._sequence_id = max(getattr(self, "_sequence_id", 0), raw_seq)
+
+            # Replay of stale NORMAL state file check (F06)
+            if raw_state == GatewayState.NORMAL.value:
+                age_sec = (now_utc - state_ts).total_seconds()
+                max_age = getattr(self.config, "max_state_age_seconds", 3600.0)
+                if age_sec > max_age:
+                    raise ValueError(f"Stale NORMAL state file detected (age {age_sec:.1f}s > {max_age}s). Replay rejected.")
+                expected_min = getattr(self.config, "expected_min_sequence", None)
+                if expected_min is not None and (raw_seq is None or raw_seq < expected_min):
+                    raise ValueError(f"Replayed sequence {raw_seq} is older than expected minimum {expected_min}")
+
             if raw_state == GatewayState.EMERGENCY_HALT.value:
                 self._state = GatewayState.EMERGENCY_HALT
                 self._trip_reasons = list(reasons) or ["PERSISTED_DISK_HALT"]
@@ -502,7 +560,10 @@ class CircuitBreakerEngine:
                 extra={"error": str(e), "state_path": self.state_file_path},
             )
             self._state = GatewayState.EMERGENCY_HALT
-            self._trip_reasons = ["CORRUPTED_DISK_STATE_FAIL_CLOSED"]
+            if "stale normal" in str(e).lower() or "replayed sequence" in str(e).lower():
+                self._trip_reasons = ["STALE_NORMAL_STATE_REPLAY_REJECTED"]
+            else:
+                self._trip_reasons = ["CORRUPTED_DISK_STATE_FAIL_CLOSED"]
 
     def __repr__(self) -> str:
         return f"<CircuitBreakerEngine state={self._state.value} is_halted={self.is_halted} trip_reasons={self._trip_reasons}>"

@@ -82,6 +82,8 @@ class CircuitBreakerConfig:
     state_integrity_key: Optional[str] = field(default=None, repr=False)
     env: Optional[str] = None
     require_established_state: Optional[bool] = None
+    expected_min_sequence: Optional[int] = None
+    max_state_age_seconds: float = 3600.0
 
     def __post_init__(self):
         for name, val in [
