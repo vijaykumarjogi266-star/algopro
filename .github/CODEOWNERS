@@ -1,0 +1,25 @@
+# Algo Lab Codeowners
+# Global fallback
+* @vijaykumarjogi266-star
+
+# Core Platform & Project State
+/apps/api/core/ @vijaykumarjogi266-star
+/apps/api/main.py @vijaykumarjogi266-star
+
+# Sovereign Risk Engine & Circuit Breakers
+/services/risk-engine/ @vijaykumarjogi266-star
+/services/execution_gateway/circuit_breaker.py @vijaykumarjogi266-star
+
+# Quantitative Backtest & Simulation
+/services/backtest-engine/ @vijaykumarjogi266-star
+/services/paper-engine/ @vijaykumarjogi266-star
+/quant/ @vijaykumarjogi266-star
+
+# Data Governance & Manifests
+/services/market-data/ @vijaykumarjogi266-star
+/services/data-quality/ @vijaykumarjogi266-star
+
+# CI/CD & Infrastructure
+/.github/ @vijaykumarjogi266-star
+/docker/ @vijaykumarjogi266-star
+/Makefile @vijaykumarjogi266-star
