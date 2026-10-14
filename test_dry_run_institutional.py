@@ -88,11 +88,11 @@ def run_dry_test():
         }
         # Initial cash = 100,000 INR
         # Cost basis = 12500 + 15000 = 27500 INR
-        # Fees = 45.50 INR, Slippage = 12.00 INR
-        # Expected Current Cash = 100,000 - 27500 - 45.50 - 12.00 = 72442.50 INR
+        # Fees = 45.50 INR, Slippage = 12.00 INR (Attribution metric; fill prices already embedded in cost basis)
+        # Expected Current Cash = 100,000 - 27500 - 45.50 = 72454.50 INR
         valid, imbalance, err = DoubleEntryLedgerReconciler.audit_accounting_invariants(
             initial_cash=100_000.0,
-            current_cash=72442.50,
+            current_cash=72454.50,
             positions=positions,
             total_fees_paid=45.50,
             total_slippage_paid=12.00,
@@ -105,7 +105,7 @@ def run_dry_test():
         # Inject 10.00 INR leakage
         invalid, drift, err = DoubleEntryLedgerReconciler.audit_accounting_invariants(
             initial_cash=100_000.0,
-            current_cash=72432.50,  # 10 INR leak
+            current_cash=72444.50,  # 10 INR leak
             positions=positions,
             total_fees_paid=45.50,
             total_slippage_paid=12.00,

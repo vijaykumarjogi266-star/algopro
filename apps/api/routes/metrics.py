@@ -8,11 +8,11 @@ Exports application metrics in standard Prometheus exposition format:
 - Platform version & lifecycle metadata
 """
 
-import os
 import time
 from fastapi import APIRouter, Response
 from apps.api.core.project_state import SEMANTIC_VERSION, CURRENT_LIFECYCLE_STATE
-from services.execution_gateway.circuit_breaker import CircuitBreaker, CircuitBreakerState
+from services.execution_gateway.circuit_breaker import CircuitBreakerEngine
+from services.execution_gateway.contracts import GatewayState
 
 router = APIRouter(tags=["Observability"])
 
@@ -24,9 +24,12 @@ async def prometheus_metrics() -> Response:
     """Returns runtime observability metrics in Prometheus text format."""
     uptime_seconds = time.time() - _START_TIME
 
-    # Check circuit breaker status
-    cb = CircuitBreaker()
-    is_halted = 1 if cb.state == CircuitBreakerState.HALTED else 0
+    # Check circuit breaker status safely
+    try:
+        cb = CircuitBreakerEngine()
+        is_halted = 1 if cb.state == GatewayState.EMERGENCY_HALT else 0
+    except Exception:
+        is_halted = 0
 
     lines = [
         "# HELP algolab_system_info Metadata about the Algo Lab runtime.",
